@@ -1,7 +1,14 @@
 import type { NextConfig } from "next";
 
+const apiBaseUrl =
+  process.env.NEXT_PUBLIC_API_URL ??
+  (process.env.NODE_ENV === "development" ? "http://localhost:5000" : undefined);
+
+if (!apiBaseUrl) {
+  throw new Error("NEXT_PUBLIC_API_URL must be configured for the frontend.");
+}
+
 const nextConfig: NextConfig = {
-  /* config options here */
   cacheComponents: true,
   partialPrefetching: true,
   turbopack: {
@@ -11,6 +18,14 @@ const nextConfig: NextConfig = {
         as: "*.css",
       },
     },
+  },
+  async rewrites() {
+    return [
+      {
+        source: "/api/:path*",
+        destination: `${apiBaseUrl.replace(/\/+$/, "")}/api/:path*`,
+      },
+    ];
   },
 };
 

@@ -8,6 +8,11 @@ if (!apiBaseUrl) {
 
 const apiUrl = apiBaseUrl.replace(/\/+$/, "");
 
+function getApiRequestUrl(path: string) {
+  if (typeof window !== "undefined") return `/api${path}`;
+  return `${apiUrl}/api${path}`;
+}
+
 export class ApiError extends Error {
   constructor(
     message: string,
@@ -32,7 +37,7 @@ export async function apiRequest<T>(
 ): Promise<T> {
   let response: Response;
   try {
-    response = await fetch(`${apiUrl}/api${path}`, {
+    response = await fetch(getApiRequestUrl(path), {
       ...init,
       credentials: "include",
       headers: {

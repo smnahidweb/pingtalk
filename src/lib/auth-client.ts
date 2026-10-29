@@ -11,7 +11,10 @@ if (!apiBaseUrl) {
 }
 
 export const authClient = createAuthClient({
-  baseURL: apiBaseUrl.replace(/\/+$/, ""),
+  baseURL:
+    typeof window === "undefined"
+      ? apiBaseUrl.replace(/\/+$/, "")
+      : window.location.origin,
   fetchOptions: {
     credentials: "include",
   },

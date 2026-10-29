@@ -71,7 +71,6 @@ export default function AuthScreen({
           setError(result.error.message || "We couldn’t create your account.");
           return;
         }
-        onAuthenticated(result.data.user);
       } else {
         const result = await authClient.signIn.email({
           email: email.trim(),
@@ -82,8 +81,18 @@ export default function AuthScreen({
           setError(result.error.message || "Email or password is incorrect.");
           return;
         }
-        onAuthenticated(result.data.user);
       }
+
+      const sessionResult = await authClient.getSession();
+      if (sessionResult.error || !sessionResult.data) {
+        setError(
+          isSignup
+            ? "Your account was created, but we couldn’t confirm your session. Please sign in."
+            : "Sign-in succeeded, but we couldn’t confirm your session. Please try again.",
+        );
+        return;
+      }
+      onAuthenticated(sessionResult.data.user);
     } catch {
       setError("Unable to reach PingTalk. Check your connection and try again.");
     } finally {
