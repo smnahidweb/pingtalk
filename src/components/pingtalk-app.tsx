@@ -606,8 +606,14 @@ export default function PingTalkApp({
   }, [activeConversation.id]);
 
   useEffect(() => {
+    if (
+      window.matchMedia("(max-width: 760px)").matches &&
+      !isMobileConversationOpen
+    ) {
+      return;
+    }
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [activeId, activeConversation.messages.length]);
+  }, [activeId, activeConversation.messages.length, isMobileConversationOpen]);
 
   useEffect(() => {
     function handleShortcut(event: KeyboardEvent) {
