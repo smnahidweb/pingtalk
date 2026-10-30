@@ -28,6 +28,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { io, type Socket } from "socket.io-client";
 import type { AuthUser } from "@/lib/auth-client";
 import {
   apiRequest,
@@ -229,6 +230,7 @@ export default function PingTalkApp({
   const [creatingConversation, setCreatingConversation] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
+  const socketRef = useRef<Socket | null>(null);
 
   const activeConversation = conversations.find(
     (conversation) => conversation.id === activeId,
@@ -365,6 +367,89 @@ export default function PingTalkApp({
       active = false;
     };
   }, [activeConversation.id, activeConversation.group, user.id]);
+
+  useEffect(() => {
+    const socket = io(
+      process.env.NEXT_PUBLIC_SOCKET_URL ??
+        process.env.NEXT_PUBLIC_API_URL ??
+        "http://localhost:5000",
+      {
+        withCredentials: true,
+        transports: ["websocket", "polling"],
+      },
+    );
+
+    socketRef.current = socket;
+
+    socket.on("connect", () => {
+      if (activeConversation.id) {
+        socket.emit("conversation:join", activeConversation.id);
+      }
+    });
+
+    socket.on("message:new", (payload: { conversationId: string; message: ApiMessage }) => {
+      if (payload.message.sender.id === user.id) return;
+      const conversationId = payload.conversationId;
+
+      setConversations((current) => {
+        const index = current.findIndex((conversation) => conversation.id === conversationId);
+        if (index === -1) return current;
+        const existingConversation = current[index];
+        if (existingConversation.messages.some((message) => message.id === payload.message.id)) {
+          return current;
+        }
+
+        const mapped = mapMessage(payload.message, user.id, existingConversation.group);
+        return current.map((conversation, conversationIndex) => {
+          if (conversation.id !== conversationId) return conversation;
+          const nextMessages =
+            conversation.id === activeConversation.id
+              ? [...conversation.messages, mapped]
+              : conversation.messages;
+          return {
+            ...conversation,
+            lastMessage: `${payload.message.sender.name}: ${payload.message.content}`,
+            time: formatTime(payload.message.createdAt),
+            unread:
+              conversation.id === activeConversation.id
+                ? 0
+                : conversation.unread + 1,
+            messages: nextMessages,
+          };
+        });
+      });
+    });
+
+    socket.on("message:read", (payload: { conversationId: string; messageId: string; userId: string }) => {
+      if (payload.userId === user.id) return;
+      setConversations((current) =>
+        current.map((conversation) => {
+          if (conversation.id !== payload.conversationId) return conversation;
+          return {
+            ...conversation,
+            messages: conversation.messages.map((message) =>
+              message.id === payload.messageId ? { ...message, read: true } : message,
+            ),
+          };
+        }),
+      );
+    });
+
+    socket.on("connect_error", () => {
+      setNotice("Realtime connection lost. Message history will keep syncing on refresh.");
+    });
+
+    return () => {
+      socket.disconnect();
+      socketRef.current = null;
+    };
+  }, [user.id]);
+
+  useEffect(() => {
+    if (socketRef.current && socketRef.current.connected && activeConversation.id) {
+      socketRef.current.emit("conversation:join", activeConversation.id);
+    }
+  }, [activeConversation.id]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
