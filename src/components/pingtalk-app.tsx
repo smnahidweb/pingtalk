@@ -76,6 +76,7 @@ type Conversation = {
 
 type ConversationFilter = "all" | "unread" | "groups";
 type NewConversationMode = "private" | "group" | "add";
+type ThemePreference = "system" | "light" | "dark";
 type MessagePageState = {
   conversationId: string;
   cursor: string | null;
@@ -171,6 +172,23 @@ function initials(name: string) {
     .toUpperCase();
 }
 
+function getStoredTheme(): ThemePreference {
+  if (typeof window === "undefined") return "system";
+  try {
+    const savedTheme = window.localStorage.getItem("pingtalk-theme");
+    return savedTheme === "light" || savedTheme === "dark"
+      ? savedTheme
+      : "system";
+  } catch (error) {
+    console.warn("[PingTalk] Unable to read the saved theme preference", error);
+    return "system";
+  }
+}
+
+function isThemePreference(value: string): value is ThemePreference {
+  return value === "system" || value === "light" || value === "dark";
+}
+
 function Avatar({
   name,
   tone,
@@ -216,7 +234,11 @@ export default function PingTalkApp({
   const [filter, setFilter] = useState<ConversationFilter>("all");
   const [query, setQuery] = useState("");
   const [draft, setDraft] = useState("");
-  const [theme, setTheme] = useState<"dark" | "light">("dark");
+  const [theme, setTheme] = useState<ThemePreference>("system");
+  const [themeReady, setThemeReady] = useState(false);
+  const [systemPrefersDark, setSystemPrefersDark] = useState(false);
+  const isDarkTheme =
+    theme === "system" ? systemPrefersDark : theme === "dark";
   const [profileOpen, setProfileOpen] = useState(false);
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [notice, setNotice] = useState("");
@@ -253,6 +275,31 @@ export default function PingTalkApp({
   const activeConversationIdRef = useRef(activeId);
   activeConversationIdRef.current = activeId;
   const calling = useCalling(socket, user.id);
+
+  useEffect(() => {
+    setTheme(getStoredTheme());
+    setThemeReady(true);
+  }, []);
+
+  useEffect(() => {
+    if (!themeReady) return;
+    document.documentElement.dataset.pingtalkTheme = theme;
+    try {
+      window.localStorage.setItem("pingtalk-theme", theme);
+    } catch (error) {
+      console.warn("[PingTalk] Unable to save the theme preference", error);
+    }
+  }, [theme, themeReady]);
+
+  useEffect(() => {
+    const preference = window.matchMedia("(prefers-color-scheme: dark)");
+    const updateSystemTheme = (event: MediaQueryListEvent) => {
+      setSystemPrefersDark(event.matches);
+    };
+    setSystemPrefersDark(preference.matches);
+    preference.addEventListener("change", updateSystemTheme);
+    return () => preference.removeEventListener("change", updateSystemTheme);
+  }, []);
 
   const activeConversation = conversations.find(
     (conversation) => conversation.id === activeId,
@@ -1142,23 +1189,27 @@ export default function PingTalkApp({
     <main className={`app-shell theme-${theme} ${isMobileConversationOpen ? "mobile-chat-open" : ""}`}>
       <nav className="nav-rail" aria-label="Main navigation">
         <a className="brand-mark" href="#" aria-label="PingTalk home">
-          <MessageCircle size={20} strokeWidth={2.2} />
-          <span className="brand-mark__dot" />
+          <span className="brand-mark__icon">
+            <MessageCircle size={20} strokeWidth={2.2} />
+            <span className="brand-mark__dot" />
+          </span>
+          <span className="brand-wordmark">pingtalk</span>
         </a>
         <div className="nav-rail__actions">
-          <button className="rail-button is-active" aria-label="Messages">
+          <button className="rail-button is-active" aria-label="Messages" title="Messages">
             <MessageCircle size={20} />
           </button>
-          <button className="rail-button" onClick={openSearch} aria-label="Search conversations">
+          <button className="rail-button" onClick={openSearch} aria-label="Search conversations" title="Search conversations">
             <Search size={20} />
           </button>
           <span className="rail-divider" />
           <button
             className="rail-button"
-            onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
-            aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} theme`}
+            onClick={() => setTheme(isDarkTheme ? "light" : "dark")}
+            aria-label={`Switch to ${isDarkTheme ? "light" : "dark"} theme`}
+            title={`Switch to ${isDarkTheme ? "light" : "dark"} theme`}
           >
-            {theme === "dark" ? <Sun size={20} /> : <Moon size={20} />}
+            {isDarkTheme ? <Sun size={20} /> : <Moon size={20} />}
           </button>
         </div>
         <div className="nav-rail__bottom">
@@ -1166,20 +1217,24 @@ export default function PingTalkApp({
             className={`rail-profile ${profileOpen ? "is-open" : ""}`}
             onClick={() => setProfileOpen((open) => !open)}
             aria-label="Open your profile"
+            title="Open your profile"
             aria-expanded={profileOpen}
           >
             <Avatar name={profileName} tone="me" size="small" />
-            <span className="presence-dot" />
           </button>
         </div>
       </nav>
 
       <aside className={`conversation-sidebar ${isMobileConversationOpen ? "mobile-chat-open" : ""}`}>
         <header className="sidebar-header">
+          <div className="mobile-brand" aria-label="PingTalk">
+            <span className="mobile-brand__mark"><MessageCircle size={17} strokeWidth={2.2} /></span>
+            <span className="mobile-brand__name">pingtalk</span>
+          </div>
           <div className="sidebar-heading">
             <div>
               <span className="eyebrow">YOUR SPACE</span>
-              <h1>Messages</h1>
+              <h1>Chats</h1>
             </div>
             <button className="icon-button" aria-label="Start a new conversation" onClick={openNewConversation}>
               <Plus size={19} />
@@ -1544,8 +1599,8 @@ export default function PingTalkApp({
             <strong>{activeConversation.name}</strong>
             <span>{activeConversation.group ? `${activeConversation.memberCount} members` : activeConversation.subtitle}</span>
           </div>
-          {!activeConversation.group && (
-            <div className="details-note"><span className="status-dot" />{activeConversation.online ? "Online now" : "Last active recently"}</div>
+          {!activeConversation.group && activeConversation.online && (
+            <div className="details-note"><span className="status-dot" />Online now</div>
           )}
           <div className="details-section">
             <div className="details-section__heading">
@@ -1654,18 +1709,28 @@ export default function PingTalkApp({
           <button className="dismiss-layer" onClick={() => setProfileOpen(false)} aria-label="Close profile menu" />
           <div className="profile-menu">
             <div className="profile-menu__person">
-              <Avatar name={profileName} tone="me" size="regular" online />
+              <Avatar name={profileName} tone="me" size="regular" />
               <span><strong>{profileName}</strong><small>{user.email}</small></span>
             </div>
-            <span className="profile-menu__status"><span />Available</span>
             <button type="button" onClick={() => void openProfileEditor()} disabled={profileSaving}>
               <Pencil size={16} />Edit profile<ChevronRight size={15} />
             </button>
-            <button onClick={() => setTheme(theme === "dark" ? "light" : "dark")}>
-              {theme === "dark" ? <Sun size={16} /> : <Moon size={16} />}
-              Switch to {theme === "dark" ? "light" : "dark"} theme
-              <ChevronRight size={15} />
-            </button>
+            <label className="profile-menu__theme">
+              <span>Appearance</span>
+              <select
+                value={theme}
+                onChange={(event) => {
+                  if (isThemePreference(event.target.value)) {
+                    setTheme(event.target.value);
+                  }
+                }}
+                aria-label="Appearance theme"
+              >
+                <option value="system">System</option>
+                <option value="light">Light</option>
+                <option value="dark">Dark</option>
+              </select>
+            </label>
             <span className="profile-menu__divider" />
             <button onClick={onLogout}><LogOut size={16} />Sign out<ChevronRight size={15} /></button>
           </div>
