@@ -39,6 +39,8 @@ type SignalMessage = {
   data: Record<string, unknown>;
 };
 
+type CallNotificationPermission = NotificationPermission | "unsupported";
+
 const ICE_SERVERS: RTCIceServer[] = [
   { urls: "stun:stun.l.google.com:19302" },
   { urls: "stun:stun1.l.google.com:19302" },
@@ -101,6 +103,10 @@ export function useCalling(socket: Socket | null, userId: string) {
   const [muted, setMuted] = useState(false);
   const [cameraEnabled, setCameraEnabled] = useState(true);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  const [soundEnabled, setSoundEnabled] = useState(false);
+  const [soundError, setSoundError] = useState("");
+  const [notificationPermission, setNotificationPermission] =
+    useState<CallNotificationPermission>("unsupported");
 
   const callRef = useRef(call);
   const incomingCallRef = useRef(incomingCall);
@@ -108,11 +114,228 @@ export function useCalling(socket: Socket | null, userId: string) {
   const peersRef = useRef(new Map<string, RTCPeerConnection>());
   const pendingIceRef = useRef(new Map<string, RTCIceCandidateInit[]>());
   const callActionInProgressRef = useRef(false);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const ringtoneTimerRef = useRef<number | null>(null);
+  const vibrationTimerRef = useRef<number | null>(null);
+  const ringtoneCallIdRef = useRef<string | null>(null);
+  const notificationRef = useRef<Notification | null>(null);
+  const notificationCallIdRef = useRef<string | null>(null);
+  const ringtoneOscillatorsRef = useRef(new Set<OscillatorNode>());
+  const scheduleRingtoneRef = useRef<() => void>(() => {});
+
+  const stopIncomingAlerts = useCallback((callId?: string) => {
+    if (callId && ringtoneCallIdRef.current !== callId) return;
+    ringtoneCallIdRef.current = null;
+    if (ringtoneTimerRef.current !== null) {
+      window.clearTimeout(ringtoneTimerRef.current);
+      ringtoneTimerRef.current = null;
+    }
+    if (vibrationTimerRef.current !== null) {
+      window.clearInterval(vibrationTimerRef.current);
+      vibrationTimerRef.current = null;
+    }
+    for (const oscillator of ringtoneOscillatorsRef.current) {
+      try {
+        oscillator.stop();
+      } catch {
+        // An oscillator may already have stopped after its tone finished.
+      }
+    }
+    ringtoneOscillatorsRef.current.clear();
+    if ("vibrate" in navigator) {
+      try {
+        navigator.vibrate(0);
+      } catch {
+        // Vibration can be unavailable while the document is inactive.
+      }
+    }
+    if (!callId || notificationCallIdRef.current === callId) {
+      notificationRef.current?.close();
+      notificationRef.current = null;
+      notificationCallIdRef.current = null;
+    }
+  }, []);
+
+  const playRingtoneTone = useCallback((frequency: number, startAt: number) => {
+    const context = audioContextRef.current;
+    if (!context || context.state !== "running") return;
+    const oscillator = context.createOscillator();
+    const gain = context.createGain();
+    oscillator.type = "sine";
+    oscillator.frequency.value = frequency;
+    gain.gain.setValueAtTime(0.0001, startAt);
+    gain.gain.exponentialRampToValueAtTime(0.12, startAt + 0.025);
+    gain.gain.exponentialRampToValueAtTime(0.0001, startAt + 0.2);
+    oscillator.connect(gain);
+    gain.connect(context.destination);
+    ringtoneOscillatorsRef.current.add(oscillator);
+    oscillator.onended = () => {
+      ringtoneOscillatorsRef.current.delete(oscillator);
+      oscillator.disconnect();
+      gain.disconnect();
+    };
+    oscillator.start(startAt);
+    oscillator.stop(startAt + 0.21);
+  }, []);
+
+  const scheduleRingtone = useCallback(() => {
+    const context = audioContextRef.current;
+    if (!ringtoneCallIdRef.current || !context || context.state !== "running") return;
+    if (ringtoneTimerRef.current !== null) {
+      window.clearTimeout(ringtoneTimerRef.current);
+    }
+    const startedAt = context.currentTime + 0.02;
+    playRingtoneTone(660, startedAt);
+    playRingtoneTone(880, startedAt + 0.28);
+    ringtoneTimerRef.current = window.setTimeout(() => {
+      scheduleRingtoneRef.current();
+    }, 1500);
+  }, [playRingtoneTone]);
+
+  const showCallNotification = useCallback((incoming: ActiveCall) => {
+    if (
+      typeof Notification === "undefined" ||
+      Notification.permission !== "granted" ||
+      notificationCallIdRef.current === incoming.id
+    ) {
+      return;
+    }
+    try {
+      const notification = new Notification(
+        `${incoming.caller.name} is calling`,
+        {
+          body:
+            incoming.mode === "GROUP"
+              ? `${incoming.callType === "AUDIO" ? "Audio" : "Video"} call · ${incoming.conversationName}`
+              : `${incoming.callType === "AUDIO" ? "Audio" : "Video"} call`,
+          tag: `pingtalk-call-${incoming.id}`,
+          silent: true,
+        },
+      );
+      notificationCallIdRef.current = incoming.id;
+      notificationRef.current = notification;
+      notification.onclick = () => {
+        window.focus();
+        notification.close();
+      };
+    } catch (reason) {
+      console.warn("[PingTalk calls] browser notification failed", reason);
+    }
+  }, []);
+
+  const startIncomingAlerts = useCallback((incoming: ActiveCall) => {
+    if (ringtoneCallIdRef.current === incoming.id) return;
+    stopIncomingAlerts();
+    ringtoneCallIdRef.current = incoming.id;
+    setSoundError("");
+    if ("vibrate" in navigator) {
+      try {
+        navigator.vibrate([350, 250, 350, 900]);
+        vibrationTimerRef.current = window.setInterval(() => {
+          try {
+            navigator.vibrate([350, 250, 350, 900]);
+          } catch {
+            if (vibrationTimerRef.current !== null) {
+              window.clearInterval(vibrationTimerRef.current);
+              vibrationTimerRef.current = null;
+            }
+          }
+        }, 1900);
+      } catch {
+        vibrationTimerRef.current = null;
+      }
+    }
+    if (audioContextRef.current?.state === "running") scheduleRingtone();
+    showCallNotification(incoming);
+  }, [scheduleRingtone, showCallNotification, stopIncomingAlerts]);
+
+  const enableCallSound = useCallback(async () => {
+    try {
+      let context = audioContextRef.current;
+      if (!context || context.state === "closed") {
+        context = new AudioContext();
+        audioContextRef.current = context;
+        context.onstatechange = () => {
+          const enabled = context?.state === "running";
+          setSoundEnabled(enabled);
+          if (enabled && ringtoneCallIdRef.current) scheduleRingtone();
+        };
+      }
+      if (context.state !== "running") await context.resume();
+      const enabled = context.state === "running";
+      setSoundEnabled(enabled);
+      setSoundError(
+        enabled ? "" : "Sound is blocked. Tap Enable ringtone to try again.",
+      );
+      if (enabled && ringtoneCallIdRef.current) scheduleRingtone();
+    } catch (reason) {
+      setSoundEnabled(false);
+      setSoundError("This browser cannot play the ringtone. Use the on-screen call controls.");
+      console.warn("[PingTalk calls] ringtone playback is unavailable", reason);
+    }
+  }, [scheduleRingtone]);
+
+  const requestCallNotifications = useCallback(async () => {
+    if (typeof Notification === "undefined") {
+      setNotificationPermission("unsupported");
+      return;
+    }
+    if (Notification.permission === "denied") {
+      setNotificationPermission("denied");
+      return;
+    }
+    try {
+      const permission = await Notification.requestPermission();
+      setNotificationPermission(permission);
+      const currentIncoming = incomingCallRef.current;
+      if (permission === "granted" && currentIncoming) {
+        showCallNotification(currentIncoming);
+      }
+    } catch (reason) {
+      console.warn("[PingTalk calls] notification permission request failed", reason);
+    }
+  }, [showCallNotification]);
 
   useEffect(() => {
     callRef.current = call;
     incomingCallRef.current = incomingCall;
   }, [call, incomingCall]);
+
+  useEffect(() => {
+    scheduleRingtoneRef.current = scheduleRingtone;
+  }, [scheduleRingtone]);
+
+  useEffect(() => {
+    const oscillators = ringtoneOscillatorsRef.current;
+    const permissionTimer = window.setTimeout(() => {
+      if (typeof Notification !== "undefined") {
+        setNotificationPermission(Notification.permission);
+      }
+    }, 0);
+    const unlockAudio = () => {
+      void enableCallSound();
+    };
+    window.addEventListener("pointerdown", unlockAudio, { once: true });
+    window.addEventListener("keydown", unlockAudio, { once: true });
+    return () => {
+      window.clearTimeout(permissionTimer);
+      window.removeEventListener("pointerdown", unlockAudio);
+      window.removeEventListener("keydown", unlockAudio);
+      stopIncomingAlerts();
+      for (const oscillator of oscillators) {
+        try {
+          oscillator.stop();
+        } catch {
+          // An oscillator may already have stopped after its tone finished.
+        }
+      }
+      if (audioContextRef.current) {
+        audioContextRef.current.onstatechange = null;
+      }
+      void audioContextRef.current?.close();
+      audioContextRef.current = null;
+    };
+  }, [enableCallSound, stopIncomingAlerts]);
 
   const stopMedia = useCallback(() => {
     for (const peer of peersRef.current.values()) peer.close();
@@ -269,6 +492,7 @@ export function useCalling(socket: Socket | null, userId: string) {
     const pendingCall = incomingCallRef.current ?? incomingCall;
     if (!pendingCall || callActionInProgressRef.current) return;
     callActionInProgressRef.current = true;
+    stopIncomingAlerts(pendingCall.id);
     setError("");
     setStatus("Preparing call");
     try {
@@ -289,11 +513,12 @@ export function useCalling(socket: Socket | null, userId: string) {
     } finally {
       callActionInProgressRef.current = false;
     }
-  }, [emitWithAck, getLocalMedia, incomingCall, stopMedia]);
+  }, [emitWithAck, getLocalMedia, incomingCall, stopIncomingAlerts, stopMedia]);
 
   const rejectCall = useCallback(async () => {
-    if (!incomingCall) return;
-    const rejected = incomingCall;
+    const rejected = incomingCallRef.current ?? incomingCall;
+    if (!rejected) return;
+    stopIncomingAlerts(rejected.id);
     incomingCallRef.current = null;
     setIncomingCall(null);
     try {
@@ -301,7 +526,7 @@ export function useCalling(socket: Socket | null, userId: string) {
     } catch (reason) {
       setError(getCallError(reason));
     }
-  }, [emitWithAck, incomingCall]);
+  }, [emitWithAck, incomingCall, stopIncomingAlerts]);
 
   const cancelCall = useCallback(async () => {
     const currentCall = callRef.current;
@@ -400,6 +625,7 @@ export function useCalling(socket: Socket | null, userId: string) {
       ) {
         incomingCallRef.current = payload.call;
         setIncomingCall(payload.call);
+        startIncomingAlerts(payload.call);
       }
     };
     const onAccepted = (payload: { call: ActiveCall }) => {
@@ -408,7 +634,19 @@ export function useCalling(socket: Socket | null, userId: string) {
       callRef.current = payload.call;
       setStatus("Connecting");
     };
+    const onRejected = (payload: { callId: string; userId: string }) => {
+      if (callRef.current?.id !== payload.callId) return;
+      const updatedCall = {
+        ...callRef.current,
+        pendingUserIds: callRef.current.pendingUserIds.filter(
+          (pendingUserId) => pendingUserId !== payload.userId,
+        ),
+      };
+      callRef.current = updatedCall;
+      setCall(updatedCall);
+    };
     const onAcceptedElsewhere = (payload: { callId: string }) => {
+      stopIncomingAlerts(payload.callId);
       if (incomingCallRef.current?.id === payload.callId) {
         incomingCallRef.current = null;
       }
@@ -517,6 +755,7 @@ export function useCalling(socket: Socket | null, userId: string) {
       );
     };
     const onCallEnded = (payload: { callId: string; reason: string }) => {
+      stopIncomingAlerts(payload.callId);
       if (incomingCallRef.current?.id === payload.callId) {
         incomingCallRef.current = null;
         setIncomingCall(null);
@@ -529,6 +768,7 @@ export function useCalling(socket: Socket | null, userId: string) {
       else if (payload.reason === "rejected") setError("The call was declined.");
     };
     const onCallCancelled = (payload: { callId: string }) => {
+      stopIncomingAlerts(payload.callId);
       if (incomingCallRef.current?.id === payload.callId) {
         incomingCallRef.current = null;
       }
@@ -538,6 +778,7 @@ export function useCalling(socket: Socket | null, userId: string) {
       if (callRef.current?.id === payload.callId) clearCall();
     };
     const onSocketDisconnect = () => {
+      stopIncomingAlerts();
       if (callRef.current) {
         clearCall();
         setError("The call ended because the realtime connection was lost.");
@@ -549,6 +790,7 @@ export function useCalling(socket: Socket | null, userId: string) {
 
     socket.on("call:incoming", onIncoming);
     socket.on("call:accepted", onAccepted);
+    socket.on("call:rejected", onRejected);
     socket.on("call:accepted-elsewhere", onAcceptedElsewhere);
     socket.on("call:participant-joined", onParticipantJoined);
     socket.on("call:signal", onSignal);
@@ -559,6 +801,7 @@ export function useCalling(socket: Socket | null, userId: string) {
     return () => {
       socket.off("call:incoming", onIncoming);
       socket.off("call:accepted", onAccepted);
+      socket.off("call:rejected", onRejected);
       socket.off("call:accepted-elsewhere", onAcceptedElsewhere);
       socket.off("call:participant-joined", onParticipantJoined);
       socket.off("call:signal", onSignal);
@@ -566,9 +809,18 @@ export function useCalling(socket: Socket | null, userId: string) {
       socket.off("call:ended", onCallEnded);
       socket.off("call:cancelled", onCallCancelled);
       socket.off("disconnect", onSocketDisconnect);
+      stopIncomingAlerts();
       clearCall();
     };
-  }, [clearCall, createPeer, sendSignal, socket, userId]);
+  }, [
+    clearCall,
+    createPeer,
+    sendSignal,
+    socket,
+    startIncomingAlerts,
+    stopIncomingAlerts,
+    userId,
+  ]);
 
   return {
     currentUserId: userId,
@@ -581,6 +833,11 @@ export function useCalling(socket: Socket | null, userId: string) {
     muted,
     cameraEnabled,
     elapsedSeconds,
+    soundEnabled,
+    soundError,
+    notificationPermission,
+    enableCallSound,
+    requestCallNotifications,
     startCall,
     acceptCall,
     rejectCall,

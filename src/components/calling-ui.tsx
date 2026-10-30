@@ -1,13 +1,16 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import Image from "next/image";
 import {
   Camera,
   CameraOff,
+  Bell,
   Mic,
   MicOff,
   Phone,
   PhoneOff,
+  Play,
   SwitchCamera,
   Video,
   Volume2,
@@ -39,9 +42,17 @@ function VideoTile({
   local?: boolean;
 }) {
   const videoRef = useRef<HTMLVideoElement>(null);
+  const [playbackBlocked, setPlaybackBlocked] = useState(false);
 
   useEffect(() => {
-    if (videoRef.current) videoRef.current.srcObject = stream ?? null;
+    const video = videoRef.current;
+    if (!video) return;
+    video.srcObject = stream ?? null;
+    if (!stream) return;
+    void video.play().then(
+      () => setPlaybackBlocked(false),
+      () => setPlaybackBlocked(true),
+    );
   }, [stream]);
 
   const hasVideo = Boolean(stream?.getVideoTracks().some((track) => track.enabled));
@@ -55,6 +66,24 @@ function VideoTile({
           muted={muted}
           className={hasVideo ? "call-tile__video" : "call-tile__video is-hidden"}
         />
+      )}
+      {playbackBlocked && (
+        <button
+          type="button"
+          className="call-tile__play"
+          onClick={() => {
+            const video = videoRef.current;
+            if (video) {
+              void video.play().then(
+                () => setPlaybackBlocked(false),
+                () => setPlaybackBlocked(true),
+              );
+            }
+          }}
+        >
+          <Play size={16} />
+          <span>Tap to hear or view</span>
+        </button>
       )}
       {!hasVideo && (
         <span className="call-tile__avatar" aria-hidden="true">
@@ -83,6 +112,11 @@ export default function CallingUI({
     muted,
     cameraEnabled,
     elapsedSeconds,
+    soundEnabled,
+    soundError,
+    notificationPermission,
+    enableCallSound,
+    requestCallNotifications,
     acceptCall,
     rejectCall,
     cancelCall,
@@ -169,14 +203,61 @@ export default function CallingUI({
             </button>
             <span className="call-card__eyebrow">INCOMING {incomingCall.callType} CALL</span>
             <span className="call-card__avatar" aria-hidden="true">
-              {initials(incomingCall.caller.name)}
+              {incomingCall.caller.image ? (
+                <Image
+                  src={incomingCall.caller.image}
+                  alt=""
+                  width={92}
+                  height={92}
+                  unoptimized
+                  className="call-avatar-image"
+                />
+              ) : (
+                initials(incomingCall.caller.name)
+              )}
             </span>
             <h2 id="incoming-call-title">{incomingCall.caller.name}</h2>
             <p>
+              {incomingCall.callType === "AUDIO" ? "Audio call" : "Video call"}
               {incomingCall.mode === "GROUP"
-                ? `Group call · ${incomingCall.conversationName}`
-                : "PingTalk call"}
+                ? ` · ${incomingCall.conversationName}`
+                : ""}
             </p>
+            <div className="call-card__alert-actions">
+              {!soundEnabled && (
+                <button
+                  type="button"
+                  className="call-alert-action"
+                  onClick={() => void enableCallSound()}
+                >
+                  <Volume2 size={16} />
+                  <span>Enable ringtone</span>
+                </button>
+              )}
+              {notificationPermission === "default" && (
+                <div className="call-notification-option">
+                  <span>Get a browser alert while PingTalk is open. Support varies by device.</span>
+                  <button
+                    type="button"
+                    className="call-alert-action"
+                    onClick={() => void requestCallNotifications()}
+                  >
+                    <Bell size={16} />
+                    <span>Enable notifications</span>
+                  </button>
+                </div>
+              )}
+              {notificationPermission === "denied" && (
+                <p className="call-notification-hint">
+                  Browser alerts are blocked. You can allow them in site settings.
+                </p>
+              )}
+              {!soundEnabled && (
+                <span className="call-sound-hint" role="status">
+                  {soundError || "If sound is blocked, this visual alert will stay open."}
+                </span>
+              )}
+            </div>
             <div className="call-card__actions">
               <button
                 type="button"
@@ -219,6 +300,9 @@ export default function CallingUI({
               </div>
               <span className="call-stage__duration">
                 {call.participants.length > 1 ? `${minutes}:${seconds}` : "Waiting for answer"}
+                <span className="call-stage__participant-count">
+                  {call.participants.length} participant{call.participants.length === 1 ? "" : "s"}
+                </span>
               </span>
             </header>
             <div

@@ -1352,7 +1352,7 @@ export default function PingTalkApp({
           <div className="chat-header__actions">
             <button
               type="button"
-              className="icon-button call-header-button"
+              className="icon-button call-header-button call-action"
               onClick={() => void calling.startCall(activeConversation.id, "AUDIO")}
               disabled={Boolean(calling.call || calling.incomingCall)}
               aria-label="Start audio call"
@@ -1362,7 +1362,7 @@ export default function PingTalkApp({
             </button>
             <button
               type="button"
-              className="icon-button call-header-button"
+              className="icon-button call-header-button call-action"
               onClick={() => void calling.startCall(activeConversation.id, "VIDEO")}
               disabled={Boolean(calling.call || calling.incomingCall)}
               aria-label="Start video call"

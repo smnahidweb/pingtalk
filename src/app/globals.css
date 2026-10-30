@@ -1519,8 +1519,10 @@ button:disabled {
     height: 34px;
   }
 
-  .chat-header__actions .call-action:nth-child(2) {
-    display: none;
+  .chat-header__actions .call-header-button {
+    width: 40px;
+    height: 44px;
+    flex: 0 0 40px;
   }
 
   .chat-header__actions .header-divider,
@@ -1662,8 +1664,31 @@ button:disabled {
 }
 
 @media (max-width: 380px) {
-  .call-action {
-    display: none;
+  .chat-header {
+    gap: 5px;
+  }
+
+  .chat-contact {
+    min-width: 0;
+    flex: 1 1 auto;
+  }
+
+  .chat-contact__copy {
+    min-width: 0;
+  }
+
+  .chat-contact__name {
+    max-width: 30vw;
+  }
+
+  .chat-header__actions {
+    flex: 0 0 auto;
+  }
+
+  .chat-header__actions .call-header-button {
+    width: 36px;
+    height: 40px;
+    flex: 0 0 36px;
   }
 
   .chat-header {
