@@ -11,6 +11,7 @@ import {
   LogOut,
   MessageCircle,
   MoreHorizontal,
+  Phone,
   Pencil,
   Plus,
   Search,
@@ -21,6 +22,7 @@ import {
   Users,
   X,
   Moon,
+  Video,
 } from "lucide-react";
 import {
   FormEvent,
@@ -35,6 +37,8 @@ import {
   type ApiConversation,
   type ApiMessage,
 } from "@/lib/api";
+import { useCalling } from "@/lib/use-calling";
+import CallingUI from "@/components/calling-ui";
 
 type Message = {
   id: string;
@@ -245,8 +249,10 @@ export default function PingTalkApp({
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const socketRef = useRef<Socket | null>(null);
+  const [socket, setSocket] = useState<Socket | null>(null);
   const activeConversationIdRef = useRef(activeId);
   activeConversationIdRef.current = activeId;
+  const calling = useCalling(socket, user.id);
 
   const activeConversation = conversations.find(
     (conversation) => conversation.id === activeId,
@@ -385,12 +391,20 @@ export default function PingTalkApp({
   }, [activeConversation.id, activeConversation.group, user.id]);
 
   useEffect(() => {
-    const socket = io(window.location.origin, {
+    const client = io(window.location.origin, {
       withCredentials: true,
       transports: ["polling", "websocket"],
       addTrailingSlash: false,
+      autoConnect: false,
     });
+    setSocket(client);
+    return () => {
+      client.disconnect();
+    };
+  }, []);
 
+  useEffect(() => {
+    if (!socket) return;
     socketRef.current = socket;
     const observedEngines = new WeakSet<object>();
     const observedTransports = new WeakSet<object>();
@@ -564,6 +578,7 @@ export default function PingTalkApp({
     socket.io.on("reconnect", handleReconnect);
     socket.io.on("reconnect_error", handleReconnectError);
     socket.io.on("reconnect_failed", handleReconnectFailed);
+    socket.connect();
 
     return () => {
       socket.off("connect", handleConnect);
@@ -580,7 +595,7 @@ export default function PingTalkApp({
       socket.disconnect();
       socketRef.current = null;
     };
-  }, [user.id]);
+  }, [user.id, socket]);
 
   useEffect(() => {
     if (socketRef.current && socketRef.current.connected && activeConversation.id) {
@@ -1335,6 +1350,26 @@ export default function PingTalkApp({
             {activeConversation.group && <ChevronDown className="contact-chevron" size={15} />}
           </button>
           <div className="chat-header__actions">
+            <button
+              type="button"
+              className="icon-button call-header-button"
+              onClick={() => void calling.startCall(activeConversation.id, "AUDIO")}
+              disabled={Boolean(calling.call || calling.incomingCall)}
+              aria-label="Start audio call"
+              title="Audio call"
+            >
+              <Phone size={18} />
+            </button>
+            <button
+              type="button"
+              className="icon-button call-header-button"
+              onClick={() => void calling.startCall(activeConversation.id, "VIDEO")}
+              disabled={Boolean(calling.call || calling.incomingCall)}
+              aria-label="Start video call"
+              title="Video call"
+            >
+              <Video size={18} />
+            </button>
             <button className={`icon-button ${detailsOpen ? "is-pressed" : ""}`} onClick={() => setDetailsOpen((open) => !open)} aria-label="Conversation details" aria-expanded={detailsOpen}>
               <Info size={19} />
             </button>
@@ -1845,6 +1880,8 @@ export default function PingTalkApp({
           </section>
         </div>
       )}
+
+      <CallingUI calling={calling} />
 
       <div className="mobile-bottom-nav" aria-label="Mobile navigation">
         <button className="is-active" onClick={() => setMobileChatOpen(false)}><MessageCircle size={19} /><span>Chats</span></button>
