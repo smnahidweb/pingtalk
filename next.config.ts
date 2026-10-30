@@ -22,6 +22,10 @@ const nextConfig: NextConfig = {
   async rewrites() {
     return [
       {
+        source: "/socket.io/:path*",
+        destination: `${apiBaseUrl.replace(/\/+$/, "")}/socket.io/:path*`,
+      },
+      {
         source: "/api/:path*",
         destination: `${apiBaseUrl.replace(/\/+$/, "")}/api/:path*`,
       },

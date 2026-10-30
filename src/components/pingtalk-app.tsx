@@ -231,6 +231,8 @@ export default function PingTalkApp({
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const socketRef = useRef<Socket | null>(null);
+  const activeConversationIdRef = useRef(activeId);
+  activeConversationIdRef.current = activeId;
 
   const activeConversation = conversations.find(
     (conversation) => conversation.id === activeId,
@@ -369,25 +371,51 @@ export default function PingTalkApp({
   }, [activeConversation.id, activeConversation.group, user.id]);
 
   useEffect(() => {
-    const socket = io(
-      process.env.NEXT_PUBLIC_SOCKET_URL ??
-        process.env.NEXT_PUBLIC_API_URL ??
-        "http://localhost:5000",
-      {
-        withCredentials: true,
-        transports: ["websocket", "polling"],
-      },
-    );
+    const socket = io(window.location.origin, {
+      withCredentials: true,
+      transports: ["websocket", "polling"],
+    });
 
     socketRef.current = socket;
 
-    socket.on("connect", () => {
-      if (activeConversation.id) {
-        socket.emit("conversation:join", activeConversation.id);
+    const handleConnect = () => {
+      console.info("[PingTalk realtime] connected", {
+        transport: socket.io.engine.transport.name,
+      });
+      setNotice((current) =>
+        current === "Realtime connection lost. Message history will keep syncing on refresh."
+          ? ""
+          : current,
+      );
+      const conversationId = activeConversationIdRef.current;
+      if (conversationId) {
+        socket.emit("conversation:join", conversationId);
       }
-    });
+    };
 
-    socket.on("message:new", (payload: { conversationId: string; message: ApiMessage }) => {
+    const handleDisconnect = (reason: string) => {
+      console.warn("[PingTalk realtime] disconnected", { reason });
+    };
+
+    const handleReconnectAttempt = (attempt: number) => {
+      console.info("[PingTalk realtime] reconnect attempt", { attempt });
+    };
+
+    const handleReconnect = (attempt: number) => {
+      console.info("[PingTalk realtime] reconnected", { attempt });
+    };
+
+    const handleReconnectError = (error: Error) => {
+      console.warn("[PingTalk realtime] reconnect error", {
+        message: error.message,
+      });
+    };
+
+    const handleReconnectFailed = () => {
+      console.error("[PingTalk realtime] reconnection failed");
+    };
+
+    const handleNewMessage = (payload: { conversationId: string; message: ApiMessage }) => {
       if (payload.message.sender.id === user.id) return;
       const conversationId = payload.conversationId;
 
@@ -400,10 +428,10 @@ export default function PingTalkApp({
         }
 
         const mapped = mapMessage(payload.message, user.id, existingConversation.group);
-        return current.map((conversation, conversationIndex) => {
+        return current.map((conversation) => {
           if (conversation.id !== conversationId) return conversation;
           const nextMessages =
-            conversation.id === activeConversation.id
+            conversation.id === activeConversationIdRef.current
               ? [...conversation.messages, mapped]
               : conversation.messages;
           return {
@@ -411,16 +439,20 @@ export default function PingTalkApp({
             lastMessage: `${payload.message.sender.name}: ${payload.message.content}`,
             time: formatTime(payload.message.createdAt),
             unread:
-              conversation.id === activeConversation.id
+              conversation.id === activeConversationIdRef.current
                 ? 0
                 : conversation.unread + 1,
             messages: nextMessages,
           };
         });
       });
-    });
+    };
 
-    socket.on("message:read", (payload: { conversationId: string; messageId: string; userId: string }) => {
+    const handleMessageRead = (payload: {
+      conversationId: string;
+      messageId: string;
+      userId: string;
+    }) => {
       if (payload.userId === user.id) return;
       setConversations((current) =>
         current.map((conversation) => {
@@ -433,13 +465,35 @@ export default function PingTalkApp({
           };
         }),
       );
-    });
+    };
 
-    socket.on("connect_error", () => {
+    const handleConnectError = (error: Error) => {
+      console.error("[PingTalk realtime] connection rejected or failed", {
+        message: error.message,
+      });
       setNotice("Realtime connection lost. Message history will keep syncing on refresh.");
-    });
+    };
+
+    socket.on("connect", handleConnect);
+    socket.on("disconnect", handleDisconnect);
+    socket.on("message:new", handleNewMessage);
+    socket.on("message:read", handleMessageRead);
+    socket.on("connect_error", handleConnectError);
+    socket.io.on("reconnect_attempt", handleReconnectAttempt);
+    socket.io.on("reconnect", handleReconnect);
+    socket.io.on("reconnect_error", handleReconnectError);
+    socket.io.on("reconnect_failed", handleReconnectFailed);
 
     return () => {
+      socket.off("connect", handleConnect);
+      socket.off("disconnect", handleDisconnect);
+      socket.off("message:new", handleNewMessage);
+      socket.off("message:read", handleMessageRead);
+      socket.off("connect_error", handleConnectError);
+      socket.io.off("reconnect_attempt", handleReconnectAttempt);
+      socket.io.off("reconnect", handleReconnect);
+      socket.io.off("reconnect_error", handleReconnectError);
+      socket.io.off("reconnect_failed", handleReconnectFailed);
       socket.disconnect();
       socketRef.current = null;
     };
