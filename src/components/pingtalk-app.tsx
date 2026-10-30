@@ -270,6 +270,8 @@ export default function PingTalkApp({
     members: [],
     messages: [],
   };
+  const isMobileConversationOpen =
+    mobileChatOpen && Boolean(activeConversation.id);
   const messagesLoading =
     Boolean(activeConversation.id) &&
     messagePage.conversationId !== activeConversation.id;
@@ -1131,7 +1133,7 @@ export default function PingTalkApp({
   }
 
   return (
-    <main className={`app-shell theme-${theme} ${mobileChatOpen ? "mobile-chat-open" : ""}`}>
+    <main className={`app-shell theme-${theme} ${isMobileConversationOpen ? "mobile-chat-open" : ""}`}>
       <nav className="nav-rail" aria-label="Main navigation">
         <a className="brand-mark" href="#" aria-label="PingTalk home">
           <MessageCircle size={20} strokeWidth={2.2} />
@@ -1166,7 +1168,7 @@ export default function PingTalkApp({
         </div>
       </nav>
 
-      <aside className={`conversation-sidebar ${mobileChatOpen ? "mobile-chat-open" : ""}`}>
+      <aside className={`conversation-sidebar ${isMobileConversationOpen ? "mobile-chat-open" : ""}`}>
         <header className="sidebar-header">
           <div className="sidebar-heading">
             <div>
