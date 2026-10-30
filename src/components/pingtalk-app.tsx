@@ -86,6 +86,20 @@ type UserSearchState = {
   hasMore: boolean;
 };
 
+function diagnosticError(error: Error | string) {
+  return {
+    type:
+      error instanceof Error && "type" in error
+        ? String(error.type)
+        : undefined,
+    message: error instanceof Error ? error.message : error,
+  };
+}
+
+function closeDescription(details?: Error | { description: string }) {
+  return details instanceof Error ? details.message : details?.description;
+}
+
 const avatarTones = ["violet", "blue", "rose", "green", "gold", "orange"];
 
 function formatTime(value: string) {
@@ -373,10 +387,62 @@ export default function PingTalkApp({
   useEffect(() => {
     const socket = io(window.location.origin, {
       withCredentials: true,
-      transports: ["websocket", "polling"],
+      transports: ["polling", "websocket"],
+      addTrailingSlash: false,
     });
 
     socketRef.current = socket;
+    const observedEngines = new WeakSet<object>();
+    const observedTransports = new WeakSet<object>();
+
+    const observeTransport = (transport: typeof socket.io.engine.transport) => {
+      if (observedTransports.has(transport)) return;
+      observedTransports.add(transport);
+      transport.on("error", (error) => {
+        console.error("[PingTalk realtime] transport error", {
+          transport: transport.name,
+          ...diagnosticError(error),
+        });
+      });
+      transport.on("close", (details) => {
+        console.warn("[PingTalk realtime] transport closed", {
+          transport: transport.name,
+          reason: closeDescription(details),
+        });
+      });
+    };
+
+    const observeEngine = () => {
+      const engine = socket.io.engine;
+      if (observedEngines.has(engine)) return;
+      observedEngines.add(engine);
+      console.info("[PingTalk realtime] engine opened", {
+        transport: engine.transport.name,
+      });
+      observeTransport(engine.transport);
+      engine.on("error", (error) => {
+        console.error("[PingTalk realtime] engine error", {
+          ...diagnosticError(error),
+        });
+      });
+      engine.on("close", (reason, details) => {
+        console.warn("[PingTalk realtime] engine closed", {
+          reason,
+          description: closeDescription(details),
+        });
+      });
+      engine.on("upgrade", (transport) => {
+        console.info("[PingTalk realtime] transport upgraded", {
+          transport: transport.name,
+        });
+        observeTransport(transport);
+      });
+      engine.on("upgradeError", (error) => {
+        console.warn("[PingTalk realtime] transport upgrade failed", {
+          ...diagnosticError(error),
+        });
+      });
+    };
 
     const handleConnect = () => {
       console.info("[PingTalk realtime] connected", {
@@ -395,6 +461,9 @@ export default function PingTalkApp({
 
     const handleDisconnect = (reason: string) => {
       console.warn("[PingTalk realtime] disconnected", { reason });
+      if (reason !== "io client disconnect") {
+        setNotice("Realtime connection lost. Message history will keep syncing on refresh.");
+      }
     };
 
     const handleReconnectAttempt = (attempt: number) => {
@@ -413,6 +482,16 @@ export default function PingTalkApp({
 
     const handleReconnectFailed = () => {
       console.error("[PingTalk realtime] reconnection failed");
+    };
+
+    const handleManagerClose = (
+      reason: string,
+      details?: Error | { description: string },
+    ) => {
+      console.warn("[PingTalk realtime] manager closed", {
+        reason,
+        description: closeDescription(details),
+      });
     };
 
     const handleNewMessage = (payload: { conversationId: string; message: ApiMessage }) => {
@@ -479,6 +558,8 @@ export default function PingTalkApp({
     socket.on("message:new", handleNewMessage);
     socket.on("message:read", handleMessageRead);
     socket.on("connect_error", handleConnectError);
+    socket.io.on("open", observeEngine);
+    socket.io.on("close", handleManagerClose);
     socket.io.on("reconnect_attempt", handleReconnectAttempt);
     socket.io.on("reconnect", handleReconnect);
     socket.io.on("reconnect_error", handleReconnectError);
@@ -490,6 +571,8 @@ export default function PingTalkApp({
       socket.off("message:new", handleNewMessage);
       socket.off("message:read", handleMessageRead);
       socket.off("connect_error", handleConnectError);
+      socket.io.off("open", observeEngine);
+      socket.io.off("close", handleManagerClose);
       socket.io.off("reconnect_attempt", handleReconnectAttempt);
       socket.io.off("reconnect", handleReconnect);
       socket.io.off("reconnect_error", handleReconnectError);
