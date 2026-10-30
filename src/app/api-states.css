@@ -350,6 +350,187 @@
   color: var(--text);
 }
 
+.avatar__image {
+  border-radius: inherit;
+  object-fit: cover;
+}
+
+.avatar__online {
+  z-index: 1;
+}
+
+.message-interactions {
+  display: flex;
+  min-height: 28px;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 5px;
+  margin-top: 3px;
+}
+
+.message-body {
+  position: relative;
+}
+
+.message-row--mine .message-interactions {
+  justify-content: flex-end;
+}
+
+.message-reactions {
+  display: flex;
+  max-width: 100%;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.message-reaction,
+.message-actions .message-reaction-trigger {
+  display: inline-flex;
+  min-width: 32px;
+  min-height: 28px;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 2px 7px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface-raised);
+  color: var(--text-muted);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+}
+
+.message-reaction.is-selected {
+  border-color: var(--accent-soft);
+  background: var(--accent-wash);
+  color: var(--accent-soft);
+}
+
+.message-reaction:disabled {
+  cursor: default;
+}
+
+.message-actions .message-reaction-trigger {
+  width: 30px;
+  height: 28px;
+  padding: 0;
+  color: var(--text-muted);
+}
+
+.message-reaction-picker {
+  position: absolute;
+  z-index: 12;
+  bottom: calc(100% + 3px);
+  left: 0;
+  display: flex;
+  max-width: min(100%, 288px);
+  flex-wrap: wrap;
+  gap: 3px;
+  padding: 6px;
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  background: var(--surface-raised);
+  box-shadow: 0 8px 26px rgba(0, 0, 0, 0.22);
+}
+
+.message-row--mine .message-reaction-picker {
+  right: 0;
+  left: auto;
+}
+
+.message-reaction-picker button {
+  display: grid;
+  width: 38px;
+  height: 38px;
+  place-items: center;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  cursor: pointer;
+  font-size: 20px;
+}
+
+.message-reaction-picker button:hover:not(:disabled),
+.message-reaction-picker button:focus-visible {
+  background: var(--accent-wash);
+}
+
+.message-reaction-picker button:disabled {
+  cursor: wait;
+  opacity: 0.55;
+}
+
+.profile-photo-editor {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 18px;
+}
+
+.profile-photo-editor__actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 7px;
+}
+
+.profile-photo-button {
+  min-height: 38px;
+  padding: 0 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+}
+
+.profile-photo-button--save {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #fff;
+}
+
+.profile-photo-button--remove {
+  color: var(--text-muted);
+}
+
+.profile-photo-button:disabled {
+  cursor: wait;
+  opacity: 0.55;
+}
+
+.profile-photo-editor__hint,
+.profile-photo-feedback {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: 11px;
+  text-align: center;
+}
+
+.profile-photo-feedback.is-error {
+  color: #ef9098;
+}
+
+.profile-photo-progress {
+  width: min(100%, 250px);
+  height: 5px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--border);
+}
+
+.profile-photo-progress span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent-soft);
+  transition: width 120ms ease;
+}
+
 .message-bubble--deleted {
   color: var(--text-muted) !important;
   font-style: italic;

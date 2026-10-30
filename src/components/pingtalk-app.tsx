@@ -22,9 +22,12 @@ import {
   Users,
   X,
   Moon,
+  SmilePlus,
   Video,
 } from "lucide-react";
+import Image from "next/image";
 import {
+  ChangeEvent,
   FormEvent,
   useEffect,
   useRef,
@@ -34,8 +37,11 @@ import { io, type Socket } from "socket.io-client";
 import type { AuthUser } from "@/lib/auth-client";
 import {
   apiRequest,
+  PROFILE_IMAGE_MAX_BYTES,
+  uploadProfileImage,
   type ApiConversation,
   type ApiMessage,
+  type ApiUser,
 } from "@/lib/api";
 import { useCalling } from "@/lib/use-calling";
 import CallingUI from "@/components/calling-ui";
@@ -47,6 +53,9 @@ type Message = {
   time: string;
   read?: boolean;
   author?: string;
+  senderId: string;
+  senderImage: string | null;
+  reactions: Array<{ userId: string; emoji: string }>;
   edited?: boolean;
   deleted?: boolean;
 };
@@ -54,6 +63,7 @@ type Message = {
 type Member = {
   id: string;
   name: string;
+  image: string | null;
   tone: string;
   status?: string;
   role: "OWNER" | "ADMIN" | "MEMBER";
@@ -70,6 +80,7 @@ type Conversation = {
   group: boolean;
   memberCount: number;
   tone: string;
+  avatarImage: string | null;
   members: Member[];
   messages: Message[];
 };
@@ -106,6 +117,7 @@ function closeDescription(details?: Error | { description: string }) {
 }
 
 const avatarTones = ["violet", "blue", "rose", "green", "gold", "orange"];
+const reactionEmojis = ["❤️", "😂", "👍", "😮", "😢", "😡"];
 
 function formatTime(value: string) {
   return new Intl.DateTimeFormat("en", {
@@ -122,9 +134,12 @@ function mapMessage(message: ApiMessage, userId: string, group: boolean): Messag
     text: message.content,
     time: formatTime(message.createdAt),
     read: message.read,
+    senderId: message.sender.id,
+    senderImage: message.sender.image,
+    reactions: message.reactions,
     edited: Boolean(message.editedAt),
     deleted: Boolean(message.deletedAt),
-    author: group && !isMine ? message.sender.name.split(" ")[0] : undefined,
+    author: group && !isMine ? message.sender.name : undefined,
   };
 }
 
@@ -137,6 +152,7 @@ function mapConversation(
   const members: Member[] = conversation.members.map((member, memberIndex) => ({
     id: member.id,
     name: member.id === userId ? "You" : member.name,
+    image: member.image,
     tone: avatarTones[memberIndex % avatarTones.length],
     status: member.id === userId ? "You" : "PingTalk member",
     role: member.role,
@@ -157,6 +173,7 @@ function mapConversation(
     online: false,
     group,
     tone: avatarTones[index % avatarTones.length],
+    avatarImage: group ? null : otherMember?.image ?? null,
     members,
     messages: [],
   };
@@ -192,20 +209,115 @@ function isThemePreference(value: string): value is ThemePreference {
 function Avatar({
   name,
   tone,
+  image = null,
   size = "regular",
   online = false,
 }: {
   name: string;
   tone: string;
+  image?: string | null;
   size?: "small" | "regular" | "large";
   online?: boolean;
 }) {
+  const [failedImage, setFailedImage] = useState<string | null>(null);
   return (
     <span className={`avatar avatar--${tone} avatar--${size}`} aria-hidden="true">
-      {initials(name)}
+      {image && failedImage !== image ? (
+        <Image
+          src={image}
+          alt=""
+          fill
+          sizes="68px"
+          unoptimized
+          className="avatar__image"
+          onError={() => setFailedImage(image)}
+        />
+      ) : initials(name)}
       {online && <span className="avatar__online" />}
     </span>
   );
+}
+
+function updateConversationProfile(
+  conversations: Conversation[],
+  profile: ApiUser,
+  currentUserId: string,
+) {
+  return conversations.map((conversation) => {
+    const existingMember = conversation.members.find(
+      (member) => member.id === profile.id,
+    );
+    if (!existingMember) return conversation;
+    const nextMembers = conversation.members.map((member) =>
+      member.id === profile.id
+        ? {
+            ...member,
+            name: profile.id === currentUserId ? "You" : profile.name,
+            image: profile.image,
+          }
+        : member,
+    );
+    const nextName =
+      !conversation.group && profile.id !== currentUserId
+        ? profile.name
+        : conversation.name;
+    const nextLastMessage =
+      conversation.lastMessage.startsWith(`${existingMember.name}:`)
+        ? conversation.lastMessage.replace(
+            `${existingMember.name}:`,
+            `${profile.name}:`,
+          )
+        : conversation.lastMessage;
+    return {
+      ...conversation,
+      name: nextName,
+      avatarImage:
+        !conversation.group && profile.id !== currentUserId
+          ? profile.image
+          : conversation.avatarImage,
+      lastMessage: nextLastMessage,
+      members: nextMembers,
+      messages: conversation.messages.map((message) =>
+        message.senderId === profile.id
+          ? {
+              ...message,
+              senderImage: profile.image,
+              author:
+                conversation.group && profile.id !== currentUserId
+                  ? profile.name
+                  : message.author,
+            }
+          : message,
+      ),
+    };
+  });
+}
+
+function updateMessageReactions(
+  conversations: Conversation[],
+  messageId: string,
+  reactions: Array<{ userId: string; emoji: string }>,
+) {
+  return conversations.map((conversation) => ({
+    ...conversation,
+    messages: conversation.messages.map((message) =>
+      message.id === messageId ? { ...message, reactions } : message,
+    ),
+  }));
+}
+
+function summarizeReactions(
+  reactions: Array<{ userId: string; emoji: string }>,
+  currentUserId: string,
+) {
+  const grouped = new Map<string, { count: number; selected: boolean }>();
+  for (const reaction of reactions) {
+    const current = grouped.get(reaction.emoji) ?? { count: 0, selected: false };
+    current.count += 1;
+    current.selected ||= reaction.userId === currentUserId;
+    grouped.set(reaction.emoji, current);
+  }
+  return [...grouped].map(([emoji, state]) => ({ emoji, ...state }));
 }
 
 export default function PingTalkApp({
@@ -262,14 +374,24 @@ export default function PingTalkApp({
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const [editingMessageText, setEditingMessageText] = useState("");
   const [messageMutationId, setMessageMutationId] = useState("");
+  const [reactionPickerMessageId, setReactionPickerMessageId] = useState<string | null>(null);
+  const [reactionMutationId, setReactionMutationId] = useState("");
   const [profileEditorOpen, setProfileEditorOpen] = useState(false);
   const [profileName, setProfileName] = useState(user.name);
   const [profileNameDraft, setProfileNameDraft] = useState(user.name);
+  const [profileImage, setProfileImage] = useState<string | null>(user.image ?? null);
+  const [profilePhotoFile, setProfilePhotoFile] = useState<File | null>(null);
+  const [profilePhotoPreview, setProfilePhotoPreview] = useState("");
+  const [profilePhotoProgress, setProfilePhotoProgress] = useState<number | null>(null);
+  const [profilePhotoFeedback, setProfilePhotoFeedback] = useState("");
+  const [profilePhotoError, setProfilePhotoError] = useState(false);
+  const [profilePhotoBusy, setProfilePhotoBusy] = useState(false);
   const [profileStatusDraft, setProfileStatusDraft] = useState("");
   const [profileSaving, setProfileSaving] = useState(false);
   const [creatingConversation, setCreatingConversation] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
+  const profilePhotoInputRef = useRef<HTMLInputElement>(null);
   const socketRef = useRef<Socket | null>(null);
   const [socket, setSocket] = useState<Socket | null>(null);
   const activeConversationIdRef = useRef(activeId);
@@ -290,6 +412,16 @@ export default function PingTalkApp({
       console.warn("[PingTalk] Unable to save the theme preference", error);
     }
   }, [theme, themeReady]);
+
+  useEffect(() => {
+    if (!profilePhotoFile) {
+      setProfilePhotoPreview("");
+      return;
+    }
+    const preview = URL.createObjectURL(profilePhotoFile);
+    setProfilePhotoPreview(preview);
+    return () => URL.revokeObjectURL(preview);
+  }, [profilePhotoFile]);
 
   useEffect(() => {
     const preference = window.matchMedia("(prefers-color-scheme: dark)");
@@ -314,6 +446,7 @@ export default function PingTalkApp({
     group: false,
     memberCount: 0,
     tone: "violet",
+    avatarImage: null,
     members: [],
     messages: [],
   };
@@ -609,6 +742,26 @@ export default function PingTalkApp({
       );
     };
 
+    const handleMessageReactions = (payload: {
+      conversationId: string;
+      messageId: string;
+      reactions: Array<{ userId: string; emoji: string }>;
+    }) => {
+      setConversations((current) =>
+        updateMessageReactions(current, payload.messageId, payload.reactions),
+      );
+    };
+
+    const handleUserProfileUpdated = (payload: { user: ApiUser }) => {
+      if (payload.user.id === user.id) {
+        setProfileName(payload.user.name);
+        setProfileImage(payload.user.image);
+      }
+      setConversations((current) =>
+        updateConversationProfile(current, payload.user, user.id),
+      );
+    };
+
     const handleConnectError = (error: Error) => {
       console.error("[PingTalk realtime] connection rejected or failed", {
         message: error.message,
@@ -620,6 +773,8 @@ export default function PingTalkApp({
     socket.on("disconnect", handleDisconnect);
     socket.on("message:new", handleNewMessage);
     socket.on("message:read", handleMessageRead);
+    socket.on("message:reactions", handleMessageReactions);
+    socket.on("user:profile-updated", handleUserProfileUpdated);
     socket.on("connect_error", handleConnectError);
     socket.io.on("open", observeEngine);
     socket.io.on("close", handleManagerClose);
@@ -634,6 +789,8 @@ export default function PingTalkApp({
       socket.off("disconnect", handleDisconnect);
       socket.off("message:new", handleNewMessage);
       socket.off("message:read", handleMessageRead);
+      socket.off("message:reactions", handleMessageReactions);
+      socket.off("user:profile-updated", handleUserProfileUpdated);
       socket.off("connect_error", handleConnectError);
       socket.io.off("open", observeEngine);
       socket.io.off("close", handleManagerClose);
@@ -995,9 +1152,17 @@ export default function PingTalkApp({
     setNotice("");
     try {
       const { user: profile } = await apiRequest<{
-        user: { name: string; profile: { statusMessage: string | null } | null };
+        user: ApiUser & { profile: { statusMessage: string | null } | null };
       }>("/me");
+      setProfileName(profile.name);
       setProfileNameDraft(profile.name);
+      setProfileImage(profile.image);
+      setConversations((current) =>
+        updateConversationProfile(current, profile, user.id),
+      );
+      setProfilePhotoFile(null);
+      setProfilePhotoFeedback("");
+      setProfilePhotoError(false);
       setProfileStatusDraft(profile.profile?.statusMessage ?? "");
       setProfileEditorOpen(true);
     } catch (error) {
@@ -1015,7 +1180,7 @@ export default function PingTalkApp({
     setNotice("");
     try {
       const { user: profile } = await apiRequest<{
-        user: { name: string };
+        user: ApiUser;
       }>("/me", {
         method: "PATCH",
         body: JSON.stringify({
@@ -1024,11 +1189,93 @@ export default function PingTalkApp({
         }),
       });
       setProfileName(profile.name);
+      setProfileImage(profile.image);
+      setConversations((current) =>
+        updateConversationProfile(current, profile, user.id),
+      );
       setProfileEditorOpen(false);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Unable to save your profile.");
     } finally {
       setProfileSaving(false);
+    }
+  }
+
+  function chooseProfilePhoto(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.currentTarget.files?.[0];
+    event.currentTarget.value = "";
+    if (!file) return;
+    setProfilePhotoError(false);
+    setProfilePhotoFeedback("");
+    if (!["image/jpeg", "image/png", "image/webp"].includes(file.type)) {
+      setProfilePhotoError(true);
+      setProfilePhotoFeedback("Choose a JPEG, PNG, or WebP image.");
+      return;
+    }
+    if (file.size === 0 || file.size > PROFILE_IMAGE_MAX_BYTES) {
+      setProfilePhotoError(true);
+      setProfilePhotoFeedback(
+        file.size === 0
+          ? "The selected image is empty."
+          : "Profile images must be 5 MB or smaller.",
+      );
+      return;
+    }
+    setProfilePhotoFile(file);
+    setProfilePhotoFeedback("Preview ready. Save the photo to apply it.");
+  }
+
+  async function saveProfilePhoto() {
+    if (!profilePhotoFile || profilePhotoBusy) return;
+    setProfilePhotoBusy(true);
+    setProfilePhotoProgress(0);
+    setProfilePhotoError(false);
+    setProfilePhotoFeedback("Uploading profile photo…");
+    try {
+      const { user: profile } = await uploadProfileImage(
+        profilePhotoFile,
+        setProfilePhotoProgress,
+      );
+      setProfileImage(profile.image);
+      setConversations((current) =>
+        updateConversationProfile(current, profile, user.id),
+      );
+      setProfilePhotoFile(null);
+      setProfilePhotoFeedback("Profile photo updated.");
+    } catch (error) {
+      setProfilePhotoError(true);
+      setProfilePhotoFeedback(
+        error instanceof Error ? error.message : "Unable to upload the profile photo.",
+      );
+    } finally {
+      setProfilePhotoBusy(false);
+      setProfilePhotoProgress(null);
+    }
+  }
+
+  async function removeProfilePhoto() {
+    if (profilePhotoBusy) return;
+    setProfilePhotoBusy(true);
+    setProfilePhotoError(false);
+    setProfilePhotoFeedback("Removing profile photo…");
+    try {
+      const { user: profile } = await apiRequest<{ user: ApiUser }>(
+        "/me/image",
+        { method: "DELETE" },
+      );
+      setProfileImage(profile.image);
+      setProfilePhotoFile(null);
+      setConversations((current) =>
+        updateConversationProfile(current, profile, user.id),
+      );
+      setProfilePhotoFeedback("Profile photo removed.");
+    } catch (error) {
+      setProfilePhotoError(true);
+      setProfilePhotoFeedback(
+        error instanceof Error ? error.message : "Unable to remove the profile photo.",
+      );
+    } finally {
+      setProfilePhotoBusy(false);
     }
   }
 
@@ -1145,6 +1392,35 @@ export default function PingTalkApp({
     }
   }
 
+  async function toggleMessageReaction(message: Message, emoji: string) {
+    if (reactionMutationId) return;
+    const currentReaction = message.reactions.find(
+      (reaction) => reaction.userId === user.id,
+    );
+    setReactionMutationId(message.id);
+    setNotice("");
+    try {
+      const { reactions } = await apiRequest<{
+        reactions: Array<{ userId: string; emoji: string }>;
+      }>(`/messages/${encodeURIComponent(message.id)}/reactions`, {
+        method: currentReaction?.emoji === emoji ? "DELETE" : "POST",
+        ...(currentReaction?.emoji === emoji
+          ? {}
+          : { body: JSON.stringify({ emoji }) }),
+      });
+      setConversations((current) =>
+        updateMessageReactions(current, message.id, reactions),
+      );
+      setReactionPickerMessageId(null);
+    } catch (error) {
+      setNotice(
+        error instanceof Error ? error.message : "Unable to update this reaction.",
+      );
+    } finally {
+      setReactionMutationId("");
+    }
+  }
+
   async function loadOlderMessages() {
     if (!messageCursor || !activeConversation.id || olderMessagesLoading) return;
     setOlderMessagesLoading(true);
@@ -1220,7 +1496,7 @@ export default function PingTalkApp({
             title="Open your profile"
             aria-expanded={profileOpen}
           >
-            <Avatar name={profileName} tone="me" size="small" />
+            <Avatar name={profileName} image={profileImage} tone="me" size="small" />
           </button>
         </div>
       </nav>
@@ -1323,6 +1599,7 @@ export default function PingTalkApp({
                 <span className="conversation-avatar-wrap">
                   <Avatar
                     name={conversation.name}
+                    image={conversation.avatarImage}
                     tone={conversation.tone}
                     online={!conversation.group && conversation.online}
                   />
@@ -1395,6 +1672,7 @@ export default function PingTalkApp({
             <span className="header-avatar-wrap">
               <Avatar
                 name={activeConversation.name}
+                image={activeConversation.avatarImage}
                 tone={activeConversation.tone}
                 size="regular"
                 online={!activeConversation.group && activeConversation.online}
@@ -1466,12 +1744,25 @@ export default function PingTalkApp({
             )}
             {activeConversation.messages.map((message, index) => {
               const previous = activeConversation.messages[index - 1];
-              const showAuthor = activeConversation.group && message.sender === "other" && message.author && previous?.author !== message.author;
+              const startsSenderGroup =
+                !previous || previous.senderId !== message.senderId;
+              const showAvatar =
+                message.sender === "other" && startsSenderGroup;
+              const showAuthor = activeConversation.group && showAvatar;
+              const senderTone =
+                activeConversation.members.find(
+                  (member) => member.id === message.senderId,
+                )?.tone ?? "violet";
               return (
                 <div key={message.id} className={`message-row ${message.sender === "me" ? "message-row--mine" : ""}`}>
-                  {message.sender === "other" && activeConversation.group && (
-                    showAuthor ? (
-                      <Avatar name={message.author ?? activeConversation.name} tone={activeConversation.members.find((member) => member.name.startsWith(message.author ?? ""))?.tone ?? "violet"} size="small" />
+                  {message.sender === "other" && (
+                    showAvatar ? (
+                      <Avatar
+                        name={message.author ?? activeConversation.name}
+                        image={message.senderImage}
+                        tone={senderTone}
+                        size="small"
+                      />
                     ) : <span className="message-avatar-spacer" />
                   )}
                   <div className="message-body">
@@ -1504,8 +1795,45 @@ export default function PingTalkApp({
                             )}
                           </span>
                         </div>
-                        {message.sender === "me" && !message.deleted && (
-                          <div className="message-actions">
+                        <div className="message-interactions">
+                          {message.reactions.length > 0 && (
+                            <div className="message-reactions" aria-label="Message reactions">
+                              {summarizeReactions(message.reactions, user.id).map(
+                                ({ emoji, count, selected }) => (
+                                  <button
+                                    key={emoji}
+                                    type="button"
+                                    className={`message-reaction ${selected ? "is-selected" : ""}`}
+                                    aria-label={`${emoji}, ${count} ${count === 1 ? "reaction" : "reactions"}`}
+                                    aria-pressed={selected}
+                                    disabled={Boolean(reactionMutationId) || message.deleted}
+                                    onClick={() =>
+                                      void toggleMessageReaction(message, emoji)
+                                    }
+                                  >
+                                    <span>{emoji}</span><span>{count}</span>
+                                  </button>
+                                ),
+                              )}
+                            </div>
+                          )}
+                          {!message.deleted && (
+                            <div className="message-actions">
+                              <button
+                                type="button"
+                                className="message-reaction-trigger"
+                                aria-label="React to message"
+                                aria-expanded={reactionPickerMessageId === message.id}
+                                onClick={() =>
+                                  setReactionPickerMessageId((current) =>
+                                    current === message.id ? null : message.id,
+                                  )
+                                }
+                              >
+                                <SmilePlus size={14} />
+                              </button>
+                              {message.sender === "me" && (
+                                <>
                             <button
                               type="button"
                               aria-label="Edit message"
@@ -1524,8 +1852,28 @@ export default function PingTalkApp({
                             >
                               <Trash2 size={13} />
                             </button>
+                                  </>
+                                )}
+                              </div>
+                            )}
+                            {reactionPickerMessageId === message.id && !message.deleted && (
+                              <div className="message-reaction-picker" role="group" aria-label="Choose a reaction">
+                                {reactionEmojis.map((emoji) => (
+                                  <button
+                                    key={emoji}
+                                    type="button"
+                                    aria-label={`React with ${emoji}`}
+                                    disabled={reactionMutationId === message.id}
+                                    onClick={() =>
+                                      void toggleMessageReaction(message, emoji)
+                                    }
+                                  >
+                                    {emoji}
+                                  </button>
+                                ))}
+                              </div>
+                            )}
                           </div>
-                        )}
                       </>
                     )}
                   </div>
@@ -1595,7 +1943,13 @@ export default function PingTalkApp({
             <button className="icon-button" onClick={() => setDetailsOpen(false)} aria-label="Close conversation details"><X size={18} /></button>
           </div>
           <div className="details-profile">
-            <Avatar name={activeConversation.name} tone={activeConversation.tone} size="large" online={!activeConversation.group && activeConversation.online} />
+            <Avatar
+              name={activeConversation.name}
+              image={activeConversation.avatarImage}
+              tone={activeConversation.tone}
+              size="large"
+              online={!activeConversation.group && activeConversation.online}
+            />
             <strong>{activeConversation.name}</strong>
             <span>{activeConversation.group ? `${activeConversation.memberCount} members` : activeConversation.subtitle}</span>
           </div>
@@ -1622,7 +1976,7 @@ export default function PingTalkApp({
             </div>
             {activeConversation.group ? activeConversation.members.map((member) => (
               <div className="member-row" key={member.name}>
-                <Avatar name={member.name} tone={member.tone} size="small" online={member.status === "Active now"} />
+                <Avatar name={member.name} image={member.image} tone={member.tone} size="small" online={member.status === "Active now"} />
                 <span className="member-row__copy"><strong>{member.name}</strong><small>{member.role.toLowerCase()}</small></span>
                 {member.id === user.id ? (
                   <span className="you-tag">YOU</span>
@@ -1709,7 +2063,7 @@ export default function PingTalkApp({
           <button className="dismiss-layer" onClick={() => setProfileOpen(false)} aria-label="Close profile menu" />
           <div className="profile-menu">
             <div className="profile-menu__person">
-              <Avatar name={profileName} tone="me" size="regular" />
+              <Avatar name={profileName} image={profileImage} tone="me" size="regular" />
               <span><strong>{profileName}</strong><small>{user.email}</small></span>
             </div>
             <button type="button" onClick={() => void openProfileEditor()} disabled={profileSaving}>
@@ -1839,6 +2193,7 @@ export default function PingTalkApp({
                         />
                         <Avatar
                           name={result.name}
+                          image={result.image}
                           tone={avatarTones[index % avatarTones.length]}
                           size="small"
                         />
@@ -1857,6 +2212,7 @@ export default function PingTalkApp({
                       >
                         <Avatar
                           name={result.name}
+                          image={result.image}
                           tone={avatarTones[index % avatarTones.length]}
                           size="small"
                         />
@@ -1916,11 +2272,95 @@ export default function PingTalkApp({
                 className="icon-button"
                 onClick={() => setProfileEditorOpen(false)}
                 aria-label="Close profile editor"
+                disabled={profilePhotoBusy}
               >
                 <X size={18} />
               </button>
             </header>
             <form onSubmit={saveProfile}>
+              <section className="profile-photo-editor" aria-label="Profile photo">
+                <Avatar
+                  name={profileNameDraft}
+                  image={profilePhotoPreview || profileImage}
+                  tone="me"
+                  size="large"
+                />
+                <input
+                  ref={profilePhotoInputRef}
+                  className="visually-hidden"
+                  type="file"
+                  accept="image/jpeg,image/png,image/webp"
+                  onChange={chooseProfilePhoto}
+                  aria-label="Choose a profile photo"
+                />
+                <div className="profile-photo-editor__actions">
+                  <button
+                    type="button"
+                    className="profile-photo-button"
+                    onClick={() => profilePhotoInputRef.current?.click()}
+                    disabled={profilePhotoBusy}
+                  >
+                    {profilePhotoFile ? "Choose another photo" : "Choose photo"}
+                  </button>
+                  {profilePhotoFile && (
+                    <button
+                      type="button"
+                      className="profile-photo-button"
+                      onClick={() => {
+                        setProfilePhotoFile(null);
+                        setProfilePhotoFeedback("");
+                        setProfilePhotoError(false);
+                      }}
+                      disabled={profilePhotoBusy}
+                    >
+                      Cancel selection
+                    </button>
+                  )}
+                  {profileImage && (
+                    <button
+                      type="button"
+                      className="profile-photo-button profile-photo-button--remove"
+                      onClick={() => void removeProfilePhoto()}
+                      disabled={profilePhotoBusy}
+                    >
+                      Remove photo
+                    </button>
+                  )}
+                  {profilePhotoFile && (
+                    <button
+                      type="button"
+                      className="profile-photo-button profile-photo-button--save"
+                      onClick={() => void saveProfilePhoto()}
+                      disabled={profilePhotoBusy}
+                    >
+                      {profilePhotoBusy ? "Uploading…" : "Save photo"}
+                    </button>
+                  )}
+                </div>
+                <p className="profile-photo-editor__hint">
+                  JPEG, PNG, or WebP · up to 5 MB
+                </p>
+                {profilePhotoProgress !== null && (
+                  <div
+                    className="profile-photo-progress"
+                    role="progressbar"
+                    aria-label="Profile photo upload progress"
+                    aria-valuemin={0}
+                    aria-valuemax={100}
+                    aria-valuenow={profilePhotoProgress}
+                  >
+                    <span style={{ width: `${profilePhotoProgress}%` }} />
+                  </div>
+                )}
+                {profilePhotoFeedback && (
+                  <p
+                    className={`profile-photo-feedback ${profilePhotoError ? "is-error" : ""}`}
+                    role={profilePhotoError ? "alert" : "status"}
+                  >
+                    {profilePhotoFeedback}
+                  </p>
+                )}
+              </section>
               <label className="conversation-dialog__group-name">
                 <span>Display name</span>
                 <input
@@ -1944,7 +2384,12 @@ export default function PingTalkApp({
               <button
                 type="submit"
                 className="auth-submit auth-refined__submit"
-                disabled={profileSaving || profileNameDraft.trim().length < 2}
+                disabled={
+                  profileSaving ||
+                  profilePhotoBusy ||
+                  Boolean(profilePhotoFile) ||
+                  profileNameDraft.trim().length < 2
+                }
               >
                 {profileSaving ? "Saving…" : "Save profile"}
                 <ChevronRight size={16} aria-hidden="true" />
@@ -1959,7 +2404,7 @@ export default function PingTalkApp({
       <div className="mobile-bottom-nav" aria-label="Mobile navigation">
         <button className="is-active" onClick={() => setMobileChatOpen(false)}><MessageCircle size={19} /><span>Chats</span></button>
         <button onClick={openSearch}><Search size={19} /><span>Search</span></button>
-        <button onClick={() => setProfileOpen((open) => !open)}><Avatar name={profileName} tone="me" size="small" /><span>You</span></button>
+        <button onClick={() => setProfileOpen((open) => !open)}>        <Avatar name={profileName} image={profileImage} tone="me" size="small" /><span>You</span></button>
       </div>
     </main>
   );
