@@ -22,6 +22,7 @@ import {
   Users,
   X,
   Moon,
+  Paperclip,
   SmilePlus,
   Video,
 } from "lucide-react";
@@ -37,7 +38,9 @@ import { io, type Socket } from "socket.io-client";
 import type { AuthUser } from "@/lib/auth-client";
 import {
   apiRequest,
+  MESSAGE_ATTACHMENT_MAX_BYTES,
   PROFILE_IMAGE_MAX_BYTES,
+  uploadConversationAttachment,
   uploadProfileImage,
   type ApiConversation,
   type ApiMessage,
@@ -56,6 +59,7 @@ type Message = {
   senderId: string;
   senderImage: string | null;
   reactions: Array<{ userId: string; emoji: string }>;
+  attachments: ApiMessage["attachments"];
   edited?: boolean;
   deleted?: boolean;
 };
@@ -66,6 +70,8 @@ type Member = {
   image: string | null;
   tone: string;
   status?: string;
+  online: boolean;
+  lastSeenAt: string | null;
   role: "OWNER" | "ADMIN" | "MEMBER";
 };
 
@@ -126,6 +132,32 @@ function formatTime(value: string) {
   }).format(new Date(value));
 }
 
+function formatPresence(
+  online: boolean,
+  lastSeenAt: string | null,
+  now = Date.now(),
+) {
+  if (online) return "Active now";
+  if (!lastSeenAt) return "Last seen unavailable";
+  const minutes = Math.max(
+    1,
+    Math.floor((now - new Date(lastSeenAt).getTime()) / 60_000),
+  );
+  if (minutes < 60) {
+    return `Active ${minutes} minute${minutes === 1 ? "" : "s"} ago`;
+  }
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `Active ${hours} hour${hours === 1 ? "" : "s"} ago`;
+  if (hours < 48) return "Active yesterday";
+  const days = Math.floor(hours / 24);
+  return `Active ${days} days ago`;
+}
+
+function formatFileSize(fileSize: number) {
+  if (fileSize < 1024 * 1024) return `${Math.max(1, Math.round(fileSize / 1024))} KB`;
+  return `${(fileSize / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 function mapMessage(message: ApiMessage, userId: string, group: boolean): Message {
   const isMine = message.sender.id === userId;
   return {
@@ -137,6 +169,7 @@ function mapMessage(message: ApiMessage, userId: string, group: boolean): Messag
     senderId: message.sender.id,
     senderImage: message.sender.image,
     reactions: message.reactions,
+    attachments: message.attachments,
     edited: Boolean(message.editedAt),
     deleted: Boolean(message.deletedAt),
     author: group && !isMine ? message.sender.name : undefined,
@@ -154,7 +187,12 @@ function mapConversation(
     name: member.id === userId ? "You" : member.name,
     image: member.image,
     tone: avatarTones[memberIndex % avatarTones.length],
-    status: member.id === userId ? "You" : "PingTalk member",
+    status:
+      member.id === userId
+        ? "You"
+        : formatPresence(member.online, member.lastSeenAt),
+    online: member.online,
+    lastSeenAt: member.lastSeenAt,
     role: member.role,
   }));
   const otherMember = conversation.members.find((member) => member.id !== userId);
@@ -163,14 +201,18 @@ function mapConversation(
   return {
     id: conversation.id,
     name: group ? conversation.title : otherMember?.name ?? "Private conversation",
-    subtitle: group ? "Group conversation" : "PingTalk member",
+    subtitle: group
+      ? "Group conversation"
+      : otherMember
+        ? formatPresence(otherMember.online, otherMember.lastSeenAt)
+        : "Last seen unavailable",
     lastMessage: lastMessage
       ? `${lastMessage.senderId === userId ? "You" : lastMessage.senderName}: ${lastMessage.content}`
       : "No messages yet",
     time: lastMessage ? formatTime(lastMessage.createdAt) : "",
     unread: conversation.unreadCount,
     memberCount: conversation.memberCount,
-    online: false,
+    online: Boolean(otherMember?.online),
     group,
     tone: avatarTones[index % avatarTones.length],
     avatarImage: group ? null : otherMember?.image ?? null,
@@ -293,6 +335,47 @@ function updateConversationProfile(
   });
 }
 
+function updateConversationPresence(
+  conversations: Conversation[],
+  userId: string,
+  online: boolean,
+  lastSeenAt: string | null,
+  currentUserId: string,
+) {
+  if (userId === currentUserId) return conversations;
+  return conversations.map((conversation) => {
+    if (!conversation.members.some((member) => member.id === userId)) {
+      return conversation;
+    }
+    const members = conversation.members.map((member) =>
+      member.id === userId
+        ? {
+            ...member,
+            online,
+            lastSeenAt,
+            status: formatPresence(online, lastSeenAt),
+          }
+        : member,
+    );
+    const currentOtherMember = conversation.group
+      ? undefined
+      : members.find((member) => member.id !== currentUserId);
+    return {
+      ...conversation,
+      members,
+      online: conversation.group ? conversation.online : Boolean(currentOtherMember?.online),
+      subtitle: conversation.group
+        ? conversation.subtitle
+        : currentOtherMember
+          ? formatPresence(
+              currentOtherMember.online,
+              currentOtherMember.lastSeenAt,
+            )
+          : conversation.subtitle,
+    };
+  });
+}
+
 function updateMessageReactions(
   conversations: Conversation[],
   messageId: string,
@@ -341,6 +424,11 @@ export default function PingTalkApp({
   });
   const [olderMessagesLoading, setOlderMessagesLoading] = useState(false);
   const [sending, setSending] = useState(false);
+  const [presenceClock, setPresenceClock] = useState(() => Date.now());
+  const [attachmentFile, setAttachmentFile] = useState<File | null>(null);
+  const [attachmentUploadId, setAttachmentUploadId] = useState("");
+  const [attachmentProgress, setAttachmentProgress] = useState<number | null>(null);
+  const [attachmentFailed, setAttachmentFailed] = useState(false);
   const [reloadConversations, setReloadConversations] = useState(0);
   const [mobileChatOpen, setMobileChatOpen] = useState(false);
   const [filter, setFilter] = useState<ConversationFilter>("all");
@@ -392,6 +480,7 @@ export default function PingTalkApp({
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const profilePhotoInputRef = useRef<HTMLInputElement>(null);
+  const attachmentInputRef = useRef<HTMLInputElement>(null);
   const socketRef = useRef<Socket | null>(null);
   const [socket, setSocket] = useState<Socket | null>(null);
   const activeConversationIdRef = useRef(activeId);
@@ -412,6 +501,11 @@ export default function PingTalkApp({
       console.warn("[PingTalk] Unable to save the theme preference", error);
     }
   }, [theme, themeReady]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setPresenceClock(Date.now()), 60_000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   useEffect(() => {
     if (!profilePhotoFile) {
@@ -575,7 +669,7 @@ export default function PingTalkApp({
   useEffect(() => {
     const client = io(window.location.origin, {
       withCredentials: true,
-      transports: ["polling", "websocket"],
+      transports: ["polling"],
       addTrailingSlash: false,
       autoConnect: false,
     });
@@ -711,7 +805,11 @@ export default function PingTalkApp({
               : conversation.messages;
           return {
             ...conversation,
-            lastMessage: `${payload.message.sender.name}: ${payload.message.content}`,
+            lastMessage: `${payload.message.sender.name}: ${
+              payload.message.content ||
+              payload.message.attachments[0]?.fileName ||
+              "Attachment"
+            }`,
             time: formatTime(payload.message.createdAt),
             unread:
               conversation.id === activeConversationIdRef.current
@@ -762,6 +860,32 @@ export default function PingTalkApp({
       );
     };
 
+    const handleUserPresence = (payload: {
+      userId: string;
+      online: boolean;
+      lastSeenAt: string | null;
+    }) => {
+      if (
+        typeof payload?.userId !== "string" ||
+        typeof payload.online !== "boolean" ||
+        (payload.lastSeenAt !== null &&
+          (typeof payload.lastSeenAt !== "string" ||
+            Number.isNaN(Date.parse(payload.lastSeenAt))))
+      ) {
+        console.warn("[PingTalk realtime] ignored an invalid presence update");
+        return;
+      }
+      setConversations((current) =>
+        updateConversationPresence(
+          current,
+          payload.userId,
+          payload.online,
+          payload.lastSeenAt,
+          user.id,
+        ),
+      );
+    };
+
     const handleConnectError = (error: Error) => {
       console.error("[PingTalk realtime] connection rejected or failed", {
         message: error.message,
@@ -775,6 +899,7 @@ export default function PingTalkApp({
     socket.on("message:read", handleMessageRead);
     socket.on("message:reactions", handleMessageReactions);
     socket.on("user:profile-updated", handleUserProfileUpdated);
+    socket.on("user:presence", handleUserPresence);
     socket.on("connect_error", handleConnectError);
     socket.io.on("open", observeEngine);
     socket.io.on("close", handleManagerClose);
@@ -791,6 +916,7 @@ export default function PingTalkApp({
       socket.off("message:read", handleMessageRead);
       socket.off("message:reactions", handleMessageReactions);
       socket.off("user:profile-updated", handleUserProfileUpdated);
+      socket.off("user:presence", handleUserPresence);
       socket.off("connect_error", handleConnectError);
       socket.io.off("open", observeEngine);
       socket.io.off("close", handleManagerClose);
@@ -1217,7 +1343,7 @@ export default function PingTalkApp({
       setProfilePhotoFeedback(
         file.size === 0
           ? "The selected image is empty."
-          : "Profile images must be 5 MB or smaller.",
+          : "Profile images must be 4 MB or smaller.",
       );
       return;
     }
@@ -1279,13 +1405,104 @@ export default function PingTalkApp({
     }
   }
 
+  function chooseAttachment(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.currentTarget.files?.[0];
+    event.currentTarget.value = "";
+    if (!file) return;
+    if (draft.trim()) {
+      setNotice("Send your message before attaching a file.");
+      return;
+    }
+    if (!["image/jpeg", "image/png", "image/webp", "application/pdf"].includes(file.type)) {
+      setNotice("Share a JPEG, PNG, WebP, or PDF file.");
+      return;
+    }
+    if (file.size === 0 || file.size > MESSAGE_ATTACHMENT_MAX_BYTES) {
+      setNotice(
+        file.size === 0
+          ? "The selected file is empty."
+          : "Files must be 4 MB or smaller.",
+      );
+      return;
+    }
+    setNotice("");
+    setAttachmentFile(file);
+    setAttachmentUploadId(crypto.randomUUID());
+    setAttachmentProgress(null);
+    setAttachmentFailed(false);
+  }
+
+  function clearAttachment() {
+    if (sending) return;
+    setAttachmentFile(null);
+    setAttachmentUploadId("");
+    setAttachmentProgress(null);
+    setAttachmentFailed(false);
+  }
+
   async function sendMessage(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const text = draft.trim();
-    if (!text || !activeConversation.id || sending) return;
+    if (!activeConversation.id || sending) return;
 
     setSending(true);
     setNotice("");
+    if (attachmentFile) {
+      if (!attachmentUploadId) {
+        setSending(false);
+        setNotice("The upload could not be prepared. Choose the file again.");
+        return;
+      }
+      setAttachmentFailed(false);
+      setAttachmentProgress(0);
+      try {
+        const { message } = await uploadConversationAttachment(
+          activeConversation.id,
+          attachmentFile,
+          attachmentUploadId,
+          setAttachmentProgress,
+        );
+        const mappedMessage = mapMessage(
+          message,
+          user.id,
+          activeConversation.group,
+        );
+        setConversations((current) =>
+          current.map((conversation) =>
+            conversation.id === activeConversation.id
+              ? {
+                  ...conversation,
+                  lastMessage: `You: ${attachmentFile.name}`,
+                  time: mappedMessage.time,
+                  unread: 0,
+                  messages: conversation.messages.some(
+                    (item) => item.id === mappedMessage.id,
+                  )
+                    ? conversation.messages
+                    : [...conversation.messages, mappedMessage],
+                }
+              : conversation,
+          ),
+        );
+        setAttachmentFile(null);
+        setAttachmentUploadId("");
+        setAttachmentProgress(null);
+      } catch (error) {
+        setAttachmentFailed(true);
+        setAttachmentProgress(null);
+        setNotice(
+          error instanceof Error ? error.message : "Unable to send this file.",
+        );
+      } finally {
+        setSending(false);
+      }
+      return;
+    }
+    if (!text) {
+      setSending(false);
+      return;
+    }
+
     try {
       const { message } = await apiRequest<{ message: ApiMessage }>(
         `/conversations/${encodeURIComponent(activeConversation.id)}/messages`,
@@ -1609,7 +1826,29 @@ export default function PingTalkApp({
                 </span>
                 <span className="conversation-item__body">
                   <span className="conversation-item__top">
-                    <span className="conversation-name">{conversation.name}</span>
+                    <span className="conversation-name-stack">
+                      <span className="conversation-name">{conversation.name}</span>
+                      {!conversation.group && (
+                        <small
+                          className={`conversation-presence ${conversation.online ? "is-online" : ""}`}
+                          title={formatPresence(
+                            conversation.online,
+                            conversation.members.find(
+                              (member) => member.id !== user.id,
+                            )?.lastSeenAt ?? null,
+                            presenceClock,
+                          )}
+                        >
+                          {formatPresence(
+                            conversation.online,
+                            conversation.members.find(
+                              (member) => member.id !== user.id,
+                            )?.lastSeenAt ?? null,
+                            presenceClock,
+                          )}
+                        </small>
+                      )}
+                    </span>
                     <span className="conversation-time">{conversation.time}</span>
                   </span>
                   <span className="conversation-item__bottom">
@@ -1684,7 +1923,7 @@ export default function PingTalkApp({
                 {activeConversation.group ? (
                   <><span className="status-dot status-dot--muted" />{activeConversation.memberCount} members</>
                 ) : (
-                  <><span className={`status-dot ${activeConversation.online ? "" : "status-dot--muted"}`} />{activeConversation.online ? "Online now" : activeConversation.subtitle}</>
+                  <><span className={`status-dot ${activeConversation.online ? "" : "status-dot--muted"}`} />{activeConversation.online ? "Active now" : formatPresence(false, activeConversation.members.find((member) => member.id !== user.id)?.lastSeenAt ?? null, presenceClock)}</>
                 )}
               </span>
             </span>
@@ -1785,7 +2024,43 @@ export default function PingTalkApp({
                       <>
                         <div className="message-line">
                           <div className={`message-bubble ${message.deleted ? "message-bubble--deleted" : ""}`}>
-                            {message.text}
+                            {message.text && <span>{message.text}</span>}
+                            {!message.deleted && message.attachments.map((attachment) => (
+                              attachment.contentType.startsWith("image/") ? (
+                                <a
+                                  className="message-attachment-image"
+                                  key={attachment.id}
+                                  href={attachment.url}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  aria-label={`Open image ${attachment.fileName}`}
+                                >
+                                  <Image
+                                    src={attachment.url}
+                                    alt={attachment.fileName}
+                                    fill
+                                    sizes="(max-width: 430px) 70vw, 360px"
+                                    unoptimized
+                                  />
+                                </a>
+                              ) : (
+                                <div className="message-attachment-pdf" key={attachment.id}>
+                                  <span className="message-attachment-pdf__icon" aria-hidden="true">PDF</span>
+                                  <span className="message-attachment-pdf__details">
+                                    <strong>{attachment.fileName}</strong>
+                                    <small>{formatFileSize(attachment.fileSize)} · PDF</small>
+                                  </span>
+                                  <a
+                                    href={attachment.url}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    aria-label={`Open or download ${attachment.fileName}`}
+                                  >
+                                    Download
+                                  </a>
+                                </div>
+                              )
+                            ))}
                             {message.edited && !message.deleted && <span className="message-edited"> · edited</span>}
                           </div>
                           <span className="message-time">
@@ -1834,24 +2109,26 @@ export default function PingTalkApp({
                               </button>
                               {message.sender === "me" && (
                                 <>
-                            <button
-                              type="button"
-                              aria-label="Edit message"
-                              onClick={() => {
-                                setEditingMessageId(message.id);
-                                setEditingMessageText(message.text);
-                              }}
-                            >
-                              <Pencil size={13} />
-                            </button>
-                            <button
-                              type="button"
-                              aria-label="Delete message"
-                              onClick={() => void deleteMessage(message.id)}
-                              disabled={messageMutationId === message.id}
-                            >
-                              <Trash2 size={13} />
-                            </button>
+                                  {message.text && (
+                                    <button
+                                      type="button"
+                                      aria-label="Edit message"
+                                      onClick={() => {
+                                        setEditingMessageId(message.id);
+                                        setEditingMessageText(message.text);
+                                      }}
+                                    >
+                                      <Pencil size={13} />
+                                    </button>
+                                  )}
+                                  <button
+                                    type="button"
+                                    aria-label="Delete message"
+                                    onClick={() => void deleteMessage(message.id)}
+                                    disabled={messageMutationId === message.id}
+                                  >
+                                    <Trash2 size={13} />
+                                  </button>
                                   </>
                                 )}
                               </div>
@@ -1886,18 +2163,66 @@ export default function PingTalkApp({
 
         <footer className="composer-wrap">
           {notice && <div className="composer-notice" role="status">{notice}</div>}
+          {attachmentFile && (
+            <div className="composer-attachment-pending">
+              <span className="composer-attachment-pending__copy">
+                <strong>{attachmentFile.name}</strong>
+                <small>{formatFileSize(attachmentFile.size)}</small>
+              </span>
+              <button
+                type="button"
+                className="composer-attachment-pending__remove"
+                onClick={clearAttachment}
+                disabled={sending}
+                aria-label="Remove attachment"
+              >
+                <X size={16} />
+              </button>
+              {attachmentProgress !== null && (
+                <span
+                  className="composer-attachment-pending__progress"
+                  role="progressbar"
+                  aria-label="Attachment upload progress"
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                  aria-valuenow={attachmentProgress}
+                  style={{ width: `${attachmentProgress}%` }}
+                />
+              )}
+              {attachmentFailed && <small className="composer-attachment-pending__error">Upload failed — retry to send.</small>}
+            </div>
+          )}
           <form className="message-composer" onSubmit={sendMessage}>
+            <input
+              ref={attachmentInputRef}
+              className="visually-hidden"
+              type="file"
+              accept="image/jpeg,image/png,image/webp,application/pdf"
+              onChange={chooseAttachment}
+              aria-label="Choose an image or PDF attachment"
+            />
+            <button
+              type="button"
+              className="composer-icon composer-attachment"
+              onClick={() => attachmentInputRef.current?.click()}
+              disabled={sending || Boolean(draft.trim())}
+              aria-label="Attach an image or PDF"
+              title="Attach an image or PDF"
+            >
+              <Paperclip size={18} />
+            </button>
             <input
               className="composer-input"
               value={draft}
               onChange={(event) => setDraft(event.target.value)}
+              readOnly={Boolean(attachmentFile)}
               placeholder={`Message ${activeConversation.group ? activeConversation.name : activeConversation.name.split(" ")[0]}...`}
               aria-label="Write a message"
             />
-            <button type="button" className="composer-icon composer-emoji" aria-label="Add emoji" onClick={() => setDraft((text) => `${text}${text ? " " : ""}🙂`)}>
+            <button type="button" className="composer-icon composer-emoji" aria-label="Add emoji" disabled={Boolean(attachmentFile)} onClick={() => setDraft((text) => `${text}${text ? " " : ""}🙂`)}>
               <Smile size={19} />
             </button>
-            <button type="submit" className="send-button" disabled={!draft.trim() || sending} aria-label="Send message">
+            <button type="submit" className="send-button" disabled={(!draft.trim() && !attachmentFile) || sending} aria-label={attachmentFile ? (attachmentFailed ? "Retry attachment upload" : "Send attachment") : "Send message"}>
               <Send size={17} />
             </button>
           </form>
@@ -1953,8 +2278,19 @@ export default function PingTalkApp({
             <strong>{activeConversation.name}</strong>
             <span>{activeConversation.group ? `${activeConversation.memberCount} members` : activeConversation.subtitle}</span>
           </div>
-          {!activeConversation.group && activeConversation.online && (
-            <div className="details-note"><span className="status-dot" />Online now</div>
+          {!activeConversation.group && (
+            <div className="details-note">
+              <span className={`status-dot ${activeConversation.online ? "" : "status-dot--muted"}`} />
+              {activeConversation.online
+              ? "Active now"
+              : formatPresence(
+                  false,
+                  activeConversation.members.find(
+                    (member) => member.id !== user.id,
+                  )?.lastSeenAt ?? null,
+                  presenceClock,
+                )}
+            </div>
           )}
           <div className="details-section">
             <div className="details-section__heading">
@@ -1976,8 +2312,8 @@ export default function PingTalkApp({
             </div>
             {activeConversation.group ? activeConversation.members.map((member) => (
               <div className="member-row" key={member.name}>
-                <Avatar name={member.name} image={member.image} tone={member.tone} size="small" online={member.status === "Active now"} />
-                <span className="member-row__copy"><strong>{member.name}</strong><small>{member.role.toLowerCase()}</small></span>
+                <Avatar name={member.name} image={member.image} tone={member.tone} size="small" online={member.online} />
+                <span className="member-row__copy"><strong>{member.name}</strong><small>{member.id === user.id ? "You" : `${member.role.toLowerCase()} · ${formatPresence(member.online, member.lastSeenAt, presenceClock)}`}</small></span>
                 {member.id === user.id ? (
                   <span className="you-tag">YOU</span>
                 ) : activeConversation.members.some(
@@ -2338,7 +2674,7 @@ export default function PingTalkApp({
                   )}
                 </div>
                 <p className="profile-photo-editor__hint">
-                  JPEG, PNG, or WebP · up to 5 MB
+                  JPEG, PNG, or WebP · up to 4 MB
                 </p>
                 {profilePhotoProgress !== null && (
                   <div

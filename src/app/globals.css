@@ -523,7 +523,16 @@ button:disabled {
 }
 
 .conversation-item__top {
+  align-items: flex-start;
   margin-bottom: 5px;
+}
+
+.conversation-name-stack {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
 }
 
 .conversation-name {
@@ -533,6 +542,19 @@ button:disabled {
   font-weight: 570;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.conversation-presence {
+  overflow: hidden;
+  color: var(--text-dim);
+  font-size: 9px;
+  font-weight: 450;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.conversation-presence.is-online {
+  color: var(--success);
 }
 
 .conversation-time {
@@ -790,6 +812,11 @@ button:disabled {
 }
 
 .message-bubble {
+  display: flex;
+  max-width: 100%;
+  min-width: 0;
+  flex-direction: column;
+  gap: 7px;
   padding: 11px 15px;
   border: 1px solid var(--border);
   border-radius: 12px 12px 12px 3px;
@@ -798,6 +825,74 @@ button:disabled {
   font-size: 14px;
   line-height: 1.5;
   overflow-wrap: anywhere;
+}
+
+.message-attachment-image {
+  position: relative;
+  display: block;
+  width: min(60vw, 360px);
+  max-width: 100%;
+  aspect-ratio: 4 / 3;
+  overflow: hidden;
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.message-attachment-image img {
+  object-fit: cover;
+}
+
+.message-attachment-pdf {
+  display: flex;
+  width: min(360px, 100%);
+  min-width: 0;
+  align-items: center;
+  gap: 9px;
+}
+
+.message-attachment-pdf__icon {
+  display: grid;
+  width: 35px;
+  height: 40px;
+  flex: 0 0 35px;
+  place-items: center;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  color: var(--accent-soft);
+  font-size: 9px;
+  font-weight: 700;
+}
+
+.message-attachment-pdf__details {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.message-attachment-pdf__details strong,
+.message-attachment-pdf__details small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.message-attachment-pdf__details strong {
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.message-attachment-pdf__details small {
+  color: var(--text-dim);
+  font-size: 9px;
+}
+
+.message-attachment-pdf > a {
+  flex: 0 0 auto;
+  color: inherit;
+  font-size: 10px;
+  font-weight: 600;
 }
 
 .message-row--mine .message-bubble {
@@ -870,6 +965,70 @@ button:disabled {
   padding: 12px 34px 17px;
 }
 
+.composer-attachment-pending {
+  position: relative;
+  display: flex;
+  width: min(100%, 760px);
+  min-height: 48px;
+  align-items: center;
+  gap: 10px;
+  margin: 0 auto 8px;
+  padding: 7px 10px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-raised);
+}
+
+.composer-attachment-pending__copy {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.composer-attachment-pending__copy strong {
+  overflow: hidden;
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 550;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer-attachment-pending__copy small,
+.composer-attachment-pending__error {
+  color: var(--text-dim);
+  font-size: 9px;
+}
+
+.composer-attachment-pending__error {
+  color: #ef9098;
+}
+
+.composer-attachment-pending__remove {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  flex: 0 0 32px;
+  place-items: center;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.composer-attachment-pending__progress {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  height: 3px;
+  background: var(--accent-soft);
+  transition: width 120ms ease;
+}
+
 .message-composer {
   display: flex;
   width: min(100%, 760px);
@@ -894,6 +1053,25 @@ button:disabled {
   width: 34px;
   height: 34px;
   border-radius: 6px;
+}
+
+.composer-attachment {
+  display: grid;
+  flex: 0 0 34px;
+  place-items: center;
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.composer-attachment:hover:not(:disabled) {
+  color: var(--accent-soft);
+}
+
+.composer-attachment:disabled {
+  cursor: default;
+  opacity: 0.45;
 }
 
 .composer-input {

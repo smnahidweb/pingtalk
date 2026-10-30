@@ -24,8 +24,13 @@ export class ApiError extends Error {
   }
 }
 
-export const PROFILE_IMAGE_MAX_BYTES = 5 * 1024 * 1024;
+export const PROFILE_IMAGE_MAX_BYTES = 4 * 1024 * 1024;
+export const MESSAGE_ATTACHMENT_MAX_BYTES = 4 * 1024 * 1024;
 const PROFILE_IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
+const MESSAGE_ATTACHMENT_TYPES = new Set([
+  ...PROFILE_IMAGE_TYPES,
+  "application/pdf",
+]);
 
 export async function uploadProfileImage(
   file: File,
@@ -36,7 +41,7 @@ export async function uploadProfileImage(
   }
   if (file.size === 0 || file.size > PROFILE_IMAGE_MAX_BYTES) {
     throw new ApiError(
-      file.size === 0 ? "The selected image is empty." : "Profile images must be 5 MB or smaller.",
+      file.size === 0 ? "The selected image is empty." : "Profile images must be 4 MB or smaller.",
       file.size === 0 ? 400 : 413,
       file.size === 0 ? "EMPTY_IMAGE" : "PAYLOAD_TOO_LARGE",
     );
@@ -88,6 +93,82 @@ export async function uploadProfileImage(
       }
       onProgress(100);
       resolve({ user: payload.user });
+    };
+    request.send(file);
+  });
+}
+
+export async function uploadConversationAttachment(
+  conversationId: string,
+  file: File,
+  uploadId: string,
+  onProgress: (progress: number) => void,
+): Promise<{ message: ApiMessage }> {
+  if (!MESSAGE_ATTACHMENT_TYPES.has(file.type)) {
+    throw new ApiError("Share a JPEG, PNG, WebP, or PDF file.", 415, "UNSUPPORTED_FILE_TYPE");
+  }
+  if (file.size === 0 || file.size > MESSAGE_ATTACHMENT_MAX_BYTES) {
+    throw new ApiError(
+      file.size === 0 ? "The selected file is empty." : "Files must be 4 MB or smaller.",
+      file.size === 0 ? 400 : 413,
+      file.size === 0 ? "EMPTY_FILE" : "PAYLOAD_TOO_LARGE",
+    );
+  }
+
+  return new Promise((resolve, reject) => {
+    const request = new XMLHttpRequest();
+    request.open(
+      "POST",
+      getApiRequestUrl(`/conversations/${encodeURIComponent(conversationId)}/attachments`),
+    );
+    request.withCredentials = true;
+    request.timeout = 90_000;
+    request.setRequestHeader("Content-Type", file.type);
+    request.setRequestHeader("X-File-Name", encodeURIComponent(file.name));
+    request.setRequestHeader("X-Upload-Id", uploadId);
+    request.upload.onprogress = (event) => {
+      if (event.lengthComputable) {
+        onProgress(Math.min(100, Math.round((event.loaded / event.total) * 100)));
+      }
+    };
+    request.onerror = () => {
+      reject(new ApiError(
+        "Unable to reach PingTalk. Check your connection and try again.",
+        0,
+        "NETWORK_ERROR",
+      ));
+    };
+    request.ontimeout = () => {
+      reject(new ApiError("The upload timed out. Please try again.", 0, "UPLOAD_TIMEOUT"));
+    };
+    request.onload = () => {
+      let payload: {
+        message?: ApiMessage;
+        error?: { code?: string; message?: string };
+      };
+      try {
+        payload = JSON.parse(request.responseText) as typeof payload;
+      } catch {
+        reject(new ApiError(
+          "The server returned an unexpected response.",
+          request.status,
+          "INVALID_RESPONSE",
+        ));
+        return;
+      }
+      if (request.status < 200 || request.status >= 300 || !payload.message) {
+        if (request.status === 401 && typeof window !== "undefined") {
+          window.dispatchEvent(new Event("pingtalk:unauthorized"));
+        }
+        reject(new ApiError(
+          payload.error?.message ?? "The file could not be sent.",
+          request.status,
+          payload.error?.code ?? "REQUEST_FAILED",
+        ));
+        return;
+      }
+      onProgress(100);
+      resolve({ message: payload.message });
     };
     request.send(file);
   });
@@ -165,6 +246,8 @@ export type ApiConversation = {
     id: string;
     name: string;
     image: string | null;
+    lastSeenAt: string | null;
+    online: boolean;
     role: "OWNER" | "ADMIN" | "MEMBER";
   }>;
 };
@@ -173,6 +256,8 @@ export type ApiUser = {
   id: string;
   name: string;
   image: string | null;
+  lastSeenAt?: string | null;
+  online?: boolean;
 };
 
 export type ApiMessage = {
@@ -184,4 +269,11 @@ export type ApiMessage = {
   sender: { id: string; name: string; image: string | null };
   read: boolean;
   reactions: Array<{ userId: string; emoji: string }>;
+  attachments: Array<{
+    id: string;
+    fileName: string;
+    contentType: string;
+    fileSize: number;
+    url: string;
+  }>;
 };
