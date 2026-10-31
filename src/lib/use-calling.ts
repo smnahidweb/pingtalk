@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Socket } from "socket.io-client";
+import { apiRequest } from "@/lib/api";
 
 export type CallType = "AUDIO" | "VIDEO";
 export type CallMode = "ONE_TO_ONE" | "GROUP";
@@ -122,6 +123,30 @@ export function useCalling(socket: Socket | null, userId: string) {
   const notificationCallIdRef = useRef<string | null>(null);
   const ringtoneOscillatorsRef = useRef(new Set<OscillatorNode>());
   const scheduleRingtoneRef = useRef<() => void>(() => {});
+  const iceServersRef = useRef<RTCIceServer[]>(ICE_SERVERS);
+
+  const loadIceServers = useCallback(async () => {
+    try {
+      const result = await apiRequest<{ iceServers: RTCIceServer[] }>(
+        "/calls/ice-servers",
+      );
+      if (!Array.isArray(result.iceServers) || result.iceServers.length === 0) {
+        throw new Error("ICE configuration was empty.");
+      }
+      iceServersRef.current = result.iceServers;
+      console.info("[PingTalk calls] ICE configuration loaded", {
+        turnConfigured: result.iceServers.some((server) => {
+          const urls = Array.isArray(server.urls) ? server.urls : [server.urls];
+          return urls.some((url) => /^turns?:/i.test(url));
+        }),
+      });
+    } catch (error) {
+      iceServersRef.current = ICE_SERVERS;
+      console.warn("[PingTalk calls] ICE configuration unavailable; using STUN", {
+        errorType: error instanceof Error ? error.name : "UnknownError",
+      });
+    }
+  }, []);
 
   const stopIncomingAlerts = useCallback((callId?: string) => {
     if (callId && ringtoneCallIdRef.current !== callId) return;
@@ -377,11 +402,22 @@ export function useCalling(socket: Socket | null, userId: string) {
     (toUserId: string, signalType: SignalMessage["signalType"], data: object) => {
       const currentCall = callRef.current;
       if (!socket?.connected || !currentCall) return;
-      socket.emit("call:signal", {
+      socket.timeout(5_000).emit("call:signal", {
         callId: currentCall.id,
         toUserId,
         signalType,
         data,
+      }, (timeoutError: Error | null, response: CallResponse) => {
+        if (timeoutError) {
+          console.warn("[PingTalk calls] signaling acknowledgement timed out", {
+            signalType,
+          });
+        } else if (!response?.ok) {
+          console.warn("[PingTalk calls] signaling rejected", {
+            signalType,
+            errorCode: response?.error?.code ?? "UNKNOWN",
+          });
+        }
       });
     },
     [socket],
@@ -392,12 +428,18 @@ export function useCalling(socket: Socket | null, userId: string) {
       const existing = peersRef.current.get(remoteUserId);
       if (existing) return existing;
 
-      const peer = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+      const peer = new RTCPeerConnection({ iceServers: iceServersRef.current });
       const stream = localStreamRef.current;
       stream?.getTracks().forEach((track) => peer.addTrack(track, stream));
       peer.onicecandidate = (event) => {
         if (event.candidate) {
+          console.info("[PingTalk calls] local ICE candidate", {
+            type: event.candidate.type,
+            protocol: event.candidate.protocol,
+          });
           sendSignal(remoteUserId, "ice", event.candidate.toJSON());
+        } else {
+          console.info("[PingTalk calls] local ICE gathering complete");
         }
       };
       peer.ontrack = (event) => {
@@ -411,18 +453,74 @@ export function useCalling(socket: Socket | null, userId: string) {
       peer.onconnectionstatechange = () => {
         if (peer.connectionState === "connected") {
           setStatus("Connected");
-        } else if (
-          peer.connectionState === "connecting" ||
-          peer.connectionState === "disconnected"
-        ) {
+        } else if (peer.connectionState === "connecting") {
+          setStatus("Connecting");
+        } else if (peer.connectionState === "disconnected") {
           setStatus("Reconnecting");
         } else if (peer.connectionState === "failed") {
           setStatus("Connection failed");
         }
       };
       peer.oniceconnectionstatechange = () => {
-        if (peer.iceConnectionState === "failed") {
+        const iceState = peer.iceConnectionState;
+        console.info("[PingTalk calls] ICE connection state", {
+          iceState,
+          connectionState: peer.connectionState,
+          gatheringState: peer.iceGatheringState,
+        });
+        if (iceState === "checking") {
+          setStatus("Connecting");
+        } else if (iceState === "connected" || iceState === "completed") {
+          setStatus("Connected");
+        } else if (iceState === "disconnected") {
+          setStatus("Reconnecting");
+        } else if (iceState === "failed") {
           setStatus("Connection failed");
+        }
+        if (iceState === "failed" || iceState === "disconnected") {
+          void peer.getStats().then((stats) => {
+            const candidatePairs: Array<Record<string, unknown>> = [];
+            stats.forEach((report) => {
+              if (report.type !== "candidate-pair" || candidatePairs.length >= 12) return;
+              const pair = report as RTCStats & {
+                localCandidateId?: string;
+                remoteCandidateId?: string;
+                state?: string;
+                nominated?: boolean;
+                selected?: boolean;
+                protocol?: string;
+                currentRoundTripTime?: number;
+              };
+              const localCandidate = pair.localCandidateId
+                ? stats.get(pair.localCandidateId) as RTCStats & {
+                    candidateType?: string;
+                    relayProtocol?: string;
+                  }
+                : undefined;
+              const remoteCandidate = pair.remoteCandidateId
+                ? stats.get(pair.remoteCandidateId) as RTCStats & {
+                    candidateType?: string;
+                    relayProtocol?: string;
+                  }
+                : undefined;
+              candidatePairs.push({
+                state: pair.state,
+                nominated: pair.nominated,
+                selected: pair.selected,
+                localType: localCandidate?.candidateType,
+                remoteType: remoteCandidate?.candidateType,
+                protocol: pair.protocol,
+                relayProtocol: localCandidate?.relayProtocol ?? remoteCandidate?.relayProtocol,
+                roundTripTime: pair.currentRoundTripTime,
+              });
+            });
+            console.warn("[PingTalk calls] ICE candidate-pair diagnostics", {
+              iceState,
+              candidatePairs,
+            });
+          }).catch(() => {
+            console.warn("[PingTalk calls] ICE statistics unavailable");
+          });
         }
       };
       peersRef.current.set(remoteUserId, peer);
@@ -468,6 +566,7 @@ export function useCalling(socket: Socket | null, userId: string) {
       setError("");
       setStatus("Preparing call");
       try {
+        await loadIceServers();
         await getLocalMedia(callType);
         const response = await emitWithAck("call:invite", {
           conversationId,
@@ -485,7 +584,7 @@ export function useCalling(socket: Socket | null, userId: string) {
         callActionInProgressRef.current = false;
       }
     },
-    [emitWithAck, getLocalMedia, stopMedia],
+    [emitWithAck, getLocalMedia, loadIceServers, stopMedia],
   );
 
   const acceptCall = useCallback(async () => {
@@ -496,7 +595,9 @@ export function useCalling(socket: Socket | null, userId: string) {
     setError("");
     setStatus("Preparing call");
     try {
+      await loadIceServers();
       await getLocalMedia(pendingCall.callType);
+      callRef.current = pendingCall;
       const response = await emitWithAck("call:accept", {
         callId: pendingCall.id,
       });
@@ -507,13 +608,14 @@ export function useCalling(socket: Socket | null, userId: string) {
       setIncomingCall(null);
       setStatus("Connecting");
     } catch (reason) {
+      callRef.current = null;
       stopMedia();
       setStatus("Idle");
       setError(getCallError(reason));
     } finally {
       callActionInProgressRef.current = false;
     }
-  }, [emitWithAck, getLocalMedia, incomingCall, stopIncomingAlerts, stopMedia]);
+  }, [emitWithAck, getLocalMedia, incomingCall, loadIceServers, stopIncomingAlerts, stopMedia]);
 
   const rejectCall = useCallback(async () => {
     const rejected = incomingCallRef.current ?? incomingCall;
